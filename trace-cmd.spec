@@ -1,12 +1,12 @@
 Name: trace-cmd
 Version: 1.0.5
-Release: 7%{?dist}
+Release: 10%{?dist}
 License: GPLv2 and LGPLv2.1
 Summary: trace-cmd is a user interface to Ftrace
 
 Group: Development/Tools
 URL: http://www.kernel.org/pub/linux/analysis/trace-cmd/
-Source: %{URL}/%{name}-%{version}.tar.gz
+Source: %{URL}/%{name}-%{version}.tar.bz2
 
 BuildRoot: %{_tmppath}/%{name}-%{version}-%{release}-root-%(%{__id_u} -n)
 BuildRequires: xmlto
@@ -43,6 +43,19 @@ rm -rf %{buildroot}
 %{_mandir}/man5/*
 
 %changelog
+* Wed Dec 12 2012 John Kacur <jkacur@redhat.com> - 1.0.5-10
+- trace-cmd: Do not call stop_threads() if doing latency tracing
+Resolves:bz879792
+
+* Tue Oct 2 2012 John Kacur <jkacur@redhat.com> - 1.0.5-9
+-  trace-cmd: Allow more than one pid to be traced
+Resolves:bz838746
+
+* Mon Sep 10 2012 John Kacur <jkacur@redhat.com> - 1.0.5-8
+- trace-cmd: Use splice to filter out rest of buffer {746656}
+- trace-cmd: Do not use threads for extract {746656}
+Resolves:bz746656
+
 * Wed Mar 7 2012 John Kacur <jkacur@redhat.com>
 - Rebasing to trace-cmd-1.0.5
 - Backported commits for -i option.
