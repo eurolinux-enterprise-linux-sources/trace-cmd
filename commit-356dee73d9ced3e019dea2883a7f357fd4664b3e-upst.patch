@@ -1,0 +1,40 @@
+From 9760076b88a8476f5cc8c559a2581929995250b6 Mon Sep 17 00:00:00 2001
+From: Mark Asselstine <mark.asselstine@windriver.com>
+Date: Wed, 12 Dec 2012 22:06:17 +0100
+Subject: [PATCH 7/7] commit 356dee73d9ced3e019dea2883a7f357fd4664b3e upstream
+
+    trace-cmd: Do not call stop_threads() if doing latency tracing
+
+    If we are using a latency tracer we do not call start_threads() we
+    should therefore not call stop_threads() if 'latency'. Attempting
+    to call stop_threads() without first calling start_threads() will
+    cause a segfault since pids will be uninitialized.
+
+    Link: http://lkml.kernel.org/r/1333653586-3379-3-git-send-email-mark.asselst
+
+    Signed-off-by: Mark Asselstine <mark.asselstine@windriver.com>
+    Signed-off-by: Steven Rostedt <rostedt@goodmis.org>
+
+Back-ported for rhel-6.4
+Signed-off-by: John Kacur <jkacur@redhat.com>
+---
+ trace-cmd.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/trace-cmd.c b/trace-cmd.c
+index fa63b85..fc70ae8 100644
+--- a/trace-cmd.c
++++ b/trace-cmd.c
+@@ -1705,7 +1705,8 @@ int main (int argc, char **argv)
+ 		}
+ 
+ 		disable_tracing();
+-		stop_threads();
++		if (!latency)
++			stop_threads();
+ 	}
+ 
+ 	free(filter_pids);
+-- 
+1.7.11.7
+

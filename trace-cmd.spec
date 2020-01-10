@@ -1,12 +1,20 @@
 Name: trace-cmd
 Version: 1.0.5
-Release: 10%{?dist}
+Release: 11%{?dist}
 License: GPLv2 and LGPLv2.1
 Summary: trace-cmd is a user interface to Ftrace
 
 Group: Development/Tools
 URL: http://www.kernel.org/pub/linux/analysis/trace-cmd/
 Source: %{URL}/%{name}-%{version}.tar.bz2
+Patch1: parse-event-Fix-memset-pointer-size-bugs.patch
+Patch2: trace-cmd-Add-option-to-ignore-event-not-found-error.patch
+Patch3: trace-cmd-Update-documentation-for-added-i-option-to.patch
+Patch4: trace-cmd-Use-splice-to-filter-out-rest-of-buffer.patch
+Patch5: trace-cmd-Do-not-use-threads-for-extract.patch
+Patch6: trace-cmd-Allow-more-than-one-pid-to-be-traced.patch
+Patch7: commit-356dee73d9ced3e019dea2883a7f357fd4664b3e-upst.patch
+Patch8: trace-cmd-Add-checks-for-invalid-pointers-to-fix-seg.patch
 
 BuildRoot: %{_tmppath}/%{name}-%{version}-%{release}-root-%(%{__id_u} -n)
 BuildRequires: xmlto
@@ -20,6 +28,14 @@ tracers and will record into a data file.
 
 %prep
 %setup -q
+%patch1 -p1
+%patch2 -p1
+%patch3 -p1
+%patch4 -p1
+%patch5 -p1
+%patch6 -p1
+%patch7 -p1
+%patch8 -p1
 
 %build
 # MANPAGE_DOCBOOK_XSL define is hack to avoid using locate
@@ -43,6 +59,11 @@ rm -rf %{buildroot}
 %{_mandir}/man5/*
 
 %changelog
+* Thu Mar 27 2014 John Kacur <jkacur@redhat.com> - 1.0.5-11
+- Rework spec to use apply patches separate from upstream
+- trace-cmd-Add-checks-for-invalid-pointers-to-fix-seg.patch (879814)
+Resolves:bz879814
+
 * Wed Dec 12 2012 John Kacur <jkacur@redhat.com> - 1.0.5-10
 - trace-cmd: Do not call stop_threads() if doing latency tracing
 Resolves:bz879792

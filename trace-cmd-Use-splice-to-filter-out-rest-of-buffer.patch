@@ -1,0 +1,103 @@
+From 7d150356272653d370ddaac99e5352aa9db5705b Mon Sep 17 00:00:00 2001
+From: Steven Rostedt <srostedt@redhat.com>
+Date: Tue, 11 Sep 2012 00:25:08 +0200
+Subject: [PATCH 4/7] trace-cmd: Use splice to filter out rest of buffer
+
+When the main thread tells the recorders that they are finished,
+have the recorders still use splice till all data is read that
+splice can handle (full page sizes only). Then use the read function
+for the rest.
+
+Signed-off-by: Steven Rostedt <rostedt@goodmis.org>
+
+Conflicts:
+
+Documentation/trace-cmd-record.1.txt
+trace-usage.c
+
+Signed-off-by: John Kacur <jkacur@redhat.com>
+---
+ trace-record.c | 54 ++++++++++++++++++++++++++++++++++++++++--------------
+ 1 file changed, 40 insertions(+), 14 deletions(-)
+
+diff --git a/trace-record.c b/trace-record.c
+index 2a754b9..e57ef9b 100644
+--- a/trace-record.c
++++ b/trace-record.c
+@@ -128,11 +128,39 @@ struct tracecmd_recorder *tracecmd_create_recorder(const char *file, int cpu)
+ 	return recorder;
+ }
+ 
++/*
++ * Returns -1 on error.
++ *          or bytes of data read.
++ */
++static long splice_data(struct tracecmd_recorder *recorder)
++{
++	long ret;
++
++	ret = splice(recorder->trace_fd, NULL, recorder->brass[1], NULL,
++		     recorder->page_size, 1 /* SPLICE_F_MOVE */);
++	if (ret < 0) {
++		warning("recorder error in splice input");
++		return -1;
++	}
++
++	ret = splice(recorder->brass[0], NULL, recorder->fd, NULL,
++		     recorder->page_size, 3 /* and NON_BLOCK */);
++	if (ret < 0) {
++		if (errno != EAGAIN) {
++			warning("recorder error in splice output");
++			return -1;
++		}
++		ret = 0;
++	}
++
++	return ret;
++}
++
+ int tracecmd_start_recording(struct tracecmd_recorder *recorder, unsigned long sleep)
+ {
+ 	struct timespec req;
+ 	char *buf[recorder->page_size];
+-	int ret;
++	long ret;
+ 
+ 	recorder->stop = 0;
+ 
+@@ -142,21 +170,19 @@ int tracecmd_start_recording(struct tracecmd_recorder *recorder, unsigned long s
+ 			req.tv_nsec = (sleep % 1000000) * 1000;
+ 			nanosleep(&req, NULL);
+ 		}
+-
+-		ret = splice(recorder->trace_fd, NULL, recorder->brass[1], NULL,
+-			     recorder->page_size, 1 /* SPLICE_F_MOVE */);
+-		if (ret < 0) {
+-			warning("recorder error in splice input");
+-			return -1;
+-		}
+-		ret = splice(recorder->brass[0], NULL, recorder->fd, NULL,
+-			     recorder->page_size, 3 /* and NON_BLOCK */);
+-		if (ret < 0 && errno != EAGAIN) {
+-			warning("recorder error in splice output");
+-			return -1;
+-		}
++		ret = splice_data(recorder);
++		if (ret < 0)
++			return ret;
+ 	} while (!recorder->stop);
+ 
++	/* Flush via splice first */
++	do {
++		ret = splice_data(recorder);
++	} while (ret > 0);
++
++	if (ret < 0)
++		return ret;
++
+ 	/* splice only reads full pages */
+ 	do {
+ 		ret = read(recorder->trace_fd, buf, recorder->page_size);
+-- 
+1.7.11.7
+

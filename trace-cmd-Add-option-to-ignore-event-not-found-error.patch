@@ -1,0 +1,83 @@
+From d700d97ad9d68902fb66c7a94b138c1f4f8386ce Mon Sep 17 00:00:00 2001
+From: KOSAKI Motohiro <kosaki.motohiro@jp.fujitsu.com>
+Date: Tue, 29 Jun 2010 15:06:18 +0900
+Subject: [PATCH 2/7] trace-cmd: Add option to ignore event not found error
+
+Currently, if 'trace-cmd start' passes an event that is not found
+it will cause the command to fail.
+
+This can be a problem for an administrator using trace-cmd on several
+machines that have different modules configured in. One script may
+be used that has all the events to be traced, but some of the events
+may not exist on all machines. This means each machine will need
+its own separate script.
+
+Instead of having a separate script, add a '-i' option that lets one
+ignore failed events.
+
+Signed-off-by: KOSAKI Motohiro <kosaki.motohiro@jp.fujitsu.com>
+LKML-Reference: <20100629144832.38C6.A69D9226@jp.fujitsu.com>
+Signed-off-by: Steven Rostedt <rostedt@goodmis.org>
+
+Conflicts:
+
+	trace-cmd.c
+
+Signed-off-by: John Kacur <jkacur@redhat.com>
+---
+ trace-cmd.c | 11 ++++++++---
+ 1 file changed, 8 insertions(+), 3 deletions(-)
+
+diff --git a/trace-cmd.c b/trace-cmd.c
+index e7b4f8b..40f542e 100644
+--- a/trace-cmd.c
++++ b/trace-cmd.c
+@@ -104,6 +104,8 @@ struct events {
+ 
+ static struct tracecmd_recorder *recorder;
+ 
++static int ignore_event_not_found = 0;
++
+ static char *get_temp_file(int cpu)
+ {
+ 	char *file = NULL;
+@@ -707,7 +709,7 @@ static void update_event(const char *name, const char *filter,
+ 
+ 		ret = update_glob(str, filter, filter_only, update);
+ 		free(str);
+-		if (!ret)
++		if (!ret && !ignore_event_not_found)
+ 			die("No events enabled with %s", name);
+ 		return;
+ 	}
+@@ -721,7 +723,7 @@ static void update_event(const char *name, const char *filter,
+ 	ret2 = update_glob(str, filter, filter_only, update);
+ 	free(str);
+ 
+-	if (!ret && !ret2)
++	if (!ret && !ret2 && !ignore_event_not_found)
+ 		goto fail;
+ 
+ 	return;
+@@ -1372,7 +1374,7 @@ int main (int argc, char **argv)
+ 		   (strcmp(argv[1], "start") == 0) ||
+ 		   ((extract = strcmp(argv[1], "extract") == 0))) {
+ 
+-		while ((c = getopt(argc-1, argv+1, "+he:f:Fp:do:O:s:r:vg:l:n:P:N:tb:")) >= 0) {
++		while ((c = getopt(argc-1, argv+1, "+he:f:Fp:do:O:s:r:vg:l:n:P:N:tb:i")) >= 0) {
+ 			switch (c) {
+ 			case 'h':
+ 				usage(argv);
+@@ -1481,6 +1483,9 @@ int main (int argc, char **argv)
+ 			case 'b':
+ 				buffer_size = atoi(optarg);
+ 				break;
++			case 'i':
++				ignore_event_not_found = 1;
++				break;
+ 			}
+ 		}
+ 
+-- 
+1.7.11.7
+
