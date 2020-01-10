@@ -1,6 +1,6 @@
 Name: trace-cmd
 Version: 2.2.4
-Release: 3%{?dist}
+Release: 4%{?dist}
 License: GPLv2 and LGPLv2+
 Summary: trace-cmd is a user interface to Ftrace
 
@@ -13,6 +13,7 @@ Patch3: trace-cmd-don-t-call-free-on-tracing-and-path-more-t.patch
 Patch4: trace-cmd-trace-cmd.c-Don-t-deref-re-if-it-is-NULL.patch
 Patch5: trace-cmd-trace-recorder.c-Prevent-free-of-unitializ.patch
 Patch6: trace-cmd-trace-util.c-Prevent-resource-leak-by-clos.patch
+Patch7: trace-cmd-split-Do-not-allow-spliting-of-latency-tra.patch
 
 BuildRoot: %{_tmppath}/%{name}-%{version}-%{release}-root-%(%{__id_u} -n)
 BuildRequires: xmlto
@@ -35,6 +36,7 @@ tracers and will record into a data file.
 %patch4 -p1
 %patch5 -p1
 %patch6 -p1
+%patch7 -p1
 
 %build
 # MANPAGE_DOCBOOK_XSL define is hack to avoid using locate
@@ -59,7 +61,11 @@ rm -rf %{buildroot}
 %{_mandir}/man5/*
 
 %changelog
-* Wed Jan 19 2016 John Kacur <jkacur@redhat.com> - 2.2.4-3
+* Tue Sep 13 2016 John Kacur <jkacur@redhat.com> - 2.2.4-4
+- Do not allow spliting of latency tracers
+Resolves: rhbz#1328692
+
+* Tue Jan 19 2016 John Kacur <jkacur@redhat.com> - 2.2.4-3
 - trace-cmd-don-t-call-free-on-tracing-and-path-more-t.patch
 - trace-cmd-trace-cmd.c-Don-t-deref-re-if-it-is-NULL.patch
 - trace-cmd-trace-recorder.c-Prevent-free-of-unitializ.patch
