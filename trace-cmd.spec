@@ -1,25 +1,26 @@
 Name: trace-cmd
-Version: 1.0.5
-Release: 11%{?dist}
-License: GPLv2 and LGPLv2.1
+Version: 2.2.4
+Release: 3%{?dist}
+License: GPLv2 and LGPLv2+
 Summary: trace-cmd is a user interface to Ftrace
 
 Group: Development/Tools
 URL: http://www.kernel.org/pub/linux/analysis/trace-cmd/
 Source: %{URL}/%{name}-%{version}.tar.bz2
-Patch1: parse-event-Fix-memset-pointer-size-bugs.patch
-Patch2: trace-cmd-Add-option-to-ignore-event-not-found-error.patch
-Patch3: trace-cmd-Update-documentation-for-added-i-option-to.patch
-Patch4: trace-cmd-Use-splice-to-filter-out-rest-of-buffer.patch
-Patch5: trace-cmd-Do-not-use-threads-for-extract.patch
-Patch6: trace-cmd-Allow-more-than-one-pid-to-be-traced.patch
-Patch7: commit-356dee73d9ced3e019dea2883a7f357fd4664b3e-upst.patch
-Patch8: trace-cmd-Add-checks-for-invalid-pointers-to-fix-seg.patch
+Patch1: trace-cmd-Makefile-Determine-whether-to-install-to-l.patch
+Patch2: trace-cmd-record-crashes-if-f-is-used-before-e-event.patch
+Patch3: trace-cmd-don-t-call-free-on-tracing-and-path-more-t.patch
+Patch4: trace-cmd-trace-cmd.c-Don-t-deref-re-if-it-is-NULL.patch
+Patch5: trace-cmd-trace-recorder.c-Prevent-free-of-unitializ.patch
+Patch6: trace-cmd-trace-util.c-Prevent-resource-leak-by-clos.patch
 
 BuildRoot: %{_tmppath}/%{name}-%{version}-%{release}-root-%(%{__id_u} -n)
 BuildRequires: xmlto
 BuildRequires: asciidoc
 BuildRequires: mlocate
+BuildRequires: python-devel
+BuildRequires: python-libs
+BuildRequires: swig
 
 %description
 trace-cmd is a user interface to Ftrace. Instead of needing to use the
@@ -34,8 +35,6 @@ tracers and will record into a data file.
 %patch4 -p1
 %patch5 -p1
 %patch6 -p1
-%patch7 -p1
-%patch8 -p1
 
 %build
 # MANPAGE_DOCBOOK_XSL define is hack to avoid using locate
@@ -44,7 +43,7 @@ make MANPAGE_DOCBOOK_XSL=$MANPAGE_DOCBOOK_XSL all doc
 
 %install
 rm -Rf %{buildroot}
-make DESTDIR=%{buildroot} prefix=/usr install install_doc
+make DESTDIR=%{buildroot} prefix=%{_prefix} install install_doc
 
 %clean
 make clean doc_clean
@@ -54,11 +53,27 @@ rm -rf %{buildroot}
 %defattr(-,root,root,-)
 %doc COPYING COPYING.LIB README
 %{_bindir}/trace-cmd
-%{_datadir}/%{name}/plugins/*
+%{_libdir}/%{name}
+%{_datadir}/kernelshark/*
 %{_mandir}/man1/*
 %{_mandir}/man5/*
 
 %changelog
+* Wed Jan 19 2016 John Kacur <jkacur@redhat.com> - 2.2.4-3
+- trace-cmd-don-t-call-free-on-tracing-and-path-more-t.patch
+- trace-cmd-trace-cmd.c-Don-t-deref-re-if-it-is-NULL.patch
+- trace-cmd-trace-recorder.c-Prevent-free-of-unitializ.patch
+- trace-cmd-trace-util.c-Prevent-resource-leak-by-clos.patch
+Resolves: rhbz#1288579
+
+* Wed Nov 18 2015 John Kacur <jkacur@redhat.com> - 2.2.4-2
+- trace-cmd: record crashes if -f is used before -e event
+Resolves: rhbz#1249194
+
+* Fri Nov 13 2015 John Kacur <jkacur@redhat.com> - 2.2.4-1
+- Upgrade to trace-cmd-v2.2.4
+Resolves: rhbz#1218670
+
 * Thu Mar 27 2014 John Kacur <jkacur@redhat.com> - 1.0.5-11
 - Rework spec to use apply patches separate from upstream
 - trace-cmd-Add-checks-for-invalid-pointers-to-fix-seg.patch (879814)

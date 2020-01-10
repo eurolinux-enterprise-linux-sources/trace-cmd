@@ -1,0 +1,50 @@
+From ee714e08f994848675bc0e433efff0cc6f617e58 Mon Sep 17 00:00:00 2001
+From: Daniel Bristot de Oliveira <bristot@redhat.com>
+Date: Wed, 18 Nov 2015 14:25:35 +0100
+Subject: [PATCH] trace-cmd: record crashes if -f is used before -e event
+
+The trace-cmd record command is crashing if a -f filter is used before
+a -e event.
+
+The usage a -f before a -e is a command line error, and trace-cmd
+record detects this error by checking if the last_event pointer is NULL.
+
+However, the last_event is not initialized as NULL and this command line
+error is not detected. Then, the last_event is used to save the filter
+options and this causes a segmentation fault because last_event was not
+initialized yet.
+
+This problem is fixed by initializing last_event as NULL.
+
+How-to reproduce:
+  # trace-cmd record -f foo
+  Segmentation fault
+
+Expected output:
+  # trace-cmd record -f foo
+  filter must come after event
+
+Signed-off-by: Daniel Bristot de Oliveira <bristot@redhat.com>
+Tested-by: John Kacur <jkacur@redhat.com>
+- Ported to trace-cmd-stable-v2.2
+Signed-off-by: John Kacur <jkacur@redhat.com>
+---
+ trace-record.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/trace-record.c b/trace-record.c
+index 6f62b6172e51..9ed148a9c90d 100644
+--- a/trace-record.c
++++ b/trace-record.c
+@@ -2024,7 +2024,7 @@ void trace_record (int argc, char **argv)
+ 	const char *output = NULL;
+ 	const char *option;
+ 	struct event_list *event;
+-	struct event_list *last_event;
++	struct event_list *last_event = NULL;
+ 	struct tracecmd_event_list *list;
+ 	struct trace_seq *s;
+ 	char *pids;
+-- 
+2.4.3
+

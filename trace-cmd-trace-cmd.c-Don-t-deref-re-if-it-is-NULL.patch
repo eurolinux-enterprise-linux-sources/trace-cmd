@@ -1,0 +1,49 @@
+From 455d93672ec4382164d5c4074f11421b4c4d929e Mon Sep 17 00:00:00 2001
+From: John Kacur <jkacur@redhat.com>
+Date: Tue, 8 Dec 2015 01:10:52 +0100
+Subject: [PATCH 2/4] trace-cmd: trace-cmd.c Don't deref re if it is NULL
+
+Taking the strlen of "re" will cause a segmentation fault if re is NULL.
+Therefore, don't do the strlen until after the check if re is NULL
+
+Signed-off-by: John Kacur <jkacur@redhat.com>
+---
+ trace-cmd.c | 13 ++++++++-----
+ 1 file changed, 8 insertions(+), 5 deletions(-)
+
+diff --git a/trace-cmd.c b/trace-cmd.c
+index 197886248efe..fe3ac30b1276 100644
+--- a/trace-cmd.c
++++ b/trace-cmd.c
+@@ -99,12 +99,15 @@ static void show_file_re(const char *name, const char *re)
+ 	char *str;
+ 	FILE *fp;
+ 	ssize_t n;
+-	size_t l = strlen(re);
++	size_t l;
+ 
+ 	/* Just in case :-p */
+-	if (!re || l == 0) {
+-		show_file(name);
+-		return;
++	if (!re) {
++		l = strlen(re);
++		if (l == 0) {
++			show_file(name);
++			return;
++		}
+ 	}
+ 
+ 	/* Handle the newline at end of names for the user */
+@@ -112,7 +115,7 @@ static void show_file_re(const char *name, const char *re)
+ 	strcpy(str, re);
+ 	if (re[l-1] == '$')
+ 		strcpy(&str[l-1], "\n*$");
+-		
++
+ 	if (regcomp(&reg, str, REG_ICASE|REG_NOSUB))
+ 		die("invalid function regex '%s'", re);
+ 
+-- 
+2.4.3
+

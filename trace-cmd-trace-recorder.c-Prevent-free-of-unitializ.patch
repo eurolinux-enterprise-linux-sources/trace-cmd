@@ -1,0 +1,30 @@
+From 1d62890a153df81f9cf5a2ad12ad39358d6646b9 Mon Sep 17 00:00:00 2001
+From: John Kacur <jkacur@redhat.com>
+Date: Tue, 8 Dec 2015 01:46:20 +0100
+Subject: [PATCH 3/4] trace-cmd: trace-recorder.c Prevent free of unitialized
+ path
+
+Initialize "path" to NULL to prevent calling free on unitiliazed
+variable
+
+Signed-off-by: John Kacur <jkacur@redhat.com>
+---
+ trace-recorder.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/trace-recorder.c b/trace-recorder.c
+index cfdc45e053ab..71301ff7fc81 100644
+--- a/trace-recorder.c
++++ b/trace-recorder.c
+@@ -283,7 +283,7 @@ void tracecmd_stat_cpu(struct trace_seq *s, int cpu)
+ {
+ 	char buf[BUFSIZ];
+ 	char *tracing;
+-	char *path;
++	char *path = NULL;
+ 	int fd;
+ 	int r;
+ 
+-- 
+2.4.3
+
