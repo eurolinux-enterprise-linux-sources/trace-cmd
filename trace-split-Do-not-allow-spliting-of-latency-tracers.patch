@@ -1,0 +1,105 @@
+From 096b599e04a87596a151e9e01053bdd180dbc6d1 Mon Sep 17 00:00:00 2001
+From: Steven Rostedt <srostedt@redhat.com>
+Date: Fri, 8 May 2015 04:05:48 -0400
+Subject: [PATCH 7/7] trace-split: Do not allow spliting of latency tracers
+
+trace-cmd split is an operation to make large data records into more manageable sized files.
+
+But for latency tracers like:
+
+  trace-cmd record wakeup
+
+trace-cmd does not record any binary files, it only records the ASCII contents of the trace file that is only a snapshot of where the latency happens (which is usually rather small). trace-cmd split is made for "flight recording" (constant recording over a period of time) that can cause the file to become gigabytes in size. Splitting the ASCII text does not make any sense.
+
+That said, trace-cmd split should not segfault either when trying to split a latency trace. Instead do what trace-cmd hist does, which is to simply exit with an error message that says it does not support latency traces.
+
+Sighned-off-by: Steven Rostedt <srostedt@redhat.com>
+Signed-off-by: John Kacur <jkacur@redhat.com>
+---
+ trace-cmd.h   |  2 ++
+ trace-input.c | 12 ++++++++++--
+ trace-split.c |  3 +++
+ 3 files changed, 15 insertions(+), 2 deletions(-)
+
+diff --git a/trace-cmd.h b/trace-cmd.h
+index 37c037e9f8d8..099fd383a1b0 100644
+--- a/trace-cmd.h
++++ b/trace-cmd.h
+@@ -84,6 +84,7 @@ enum {
+ 
+ enum {
+ 	TRACECMD_FL_IGNORE_DATE		= 1,
++	TRACECMD_FL_LATENCY		= 2,
+ };
+ 
+ struct tracecmd_ftrace {
+@@ -106,6 +107,7 @@ int tracecmd_cpus(struct tracecmd_input *handle);
+ int tracecmd_copy_headers(struct tracecmd_input *handle, int fd);
+ void tracecmd_set_flag(struct tracecmd_input *handle, int flag);
+ void tracecmd_clear_flag(struct tracecmd_input *handle, int flag);
++unsigned long tracecmd_get_flags(struct tracecmd_input *handle);
+ 
+ void tracecmd_print_events(struct tracecmd_input *handle);
+ 
+diff --git a/trace-input.c b/trace-input.c
+index 6f60409313d5..233f057e1314 100644
+--- a/trace-input.c
++++ b/trace-input.c
+@@ -107,6 +107,11 @@ void tracecmd_clear_flag(struct tracecmd_input *handle, int flag)
+ 	handle->flags &= ~flag;
+ }
+ 
++unsigned long tracecmd_get_flags(struct tracecmd_input *handle)
++{
++	return handle->flags;
++}
++
+ #if DEBUG_RECORD
+ static void remove_record(struct page *page, struct pevent_record *record)
+ {
+@@ -1810,8 +1815,10 @@ int tracecmd_init_data(struct tracecmd_input *handle)
+ 	/*
+ 	 * Check if this is a latency report or not.
+ 	 */
+-	if (strncmp(buf, "latency", 7) == 0)
++	if (strncmp(buf, "latency", 7) == 0) {
++		handle->flags |= TRACECMD_FL_LATENCY;
+ 		return 1;
++	}
+ 
+ 	/* We expect this to be flyrecord */
+ 	if (strncmp(buf, "flyrecord", 9) != 0)
+@@ -2045,6 +2052,7 @@ struct tracecmd_input *tracecmd_alloc(const char *file)
+ struct tracecmd_input *tracecmd_open_fd(int fd)
+ {
+ 	struct tracecmd_input *handle;
++	int ret;
+ 
+ 	handle = tracecmd_alloc_fd(fd);
+ 	if (!handle)
+@@ -2053,7 +2061,7 @@ struct tracecmd_input *tracecmd_open_fd(int fd)
+ 	if (tracecmd_read_headers(handle) < 0)
+ 		goto fail;
+ 
+-	if (tracecmd_init_data(handle) < 0)
++	if ((ret = tracecmd_init_data(handle)) < 0)
+ 		goto fail;
+ 
+ 	return handle;
+diff --git a/trace-split.c b/trace-split.c
+index d18b99c88ce1..7965c646e20b 100644
+--- a/trace-split.c
++++ b/trace-split.c
+@@ -514,6 +514,9 @@ void trace_split (int argc, char **argv)
+ 	if (!handle)
+ 		die("error reading %s", input_file);
+ 
++	if (tracecmd_get_flags(handle) & TRACECMD_FL_LATENCY)
++		die("trace-cmd split does not work with latency traces\n");
++
+ 	page_size = tracecmd_page_size(handle);
+ 
+ 	pevent = tracecmd_get_pevent(handle);
+-- 
+1.8.3.1
+

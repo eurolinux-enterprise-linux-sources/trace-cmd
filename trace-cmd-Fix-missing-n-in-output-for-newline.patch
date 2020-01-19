@@ -1,0 +1,43 @@
+From 8ada9c3c24d34794958e9d1e550fd88f8abac85a Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Jan-Simon=20M=C3=B6ller?= <dl9pf@gmx.de>
+Date: Tue, 2 Jul 2013 17:33:01 +0200
+Subject: [PATCH] trace-cmd: Fix missing 'n' in output for newline
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+commit 98b86714c98ce136bd1a89e8342c002f98ca7881 upstream
+Bugzilla: 1238524
+
+We had
+trace-cmd.c:                    printf("\tracers:\n");
+
+which led to
+        racers:
+blk branch function_graph wakeup_rt wakeup irqsoff function nop
+
+Fix it by adding the missing 'n'.
+
+Signed-off-by: Jan-Simon Möller <dl9pf@gmx.de>
+Signed-off-by: Steven Rostedt <rostedt@goodmis.org>
+Signed-off-by: John Kacur <jkacur@redhat.com>
+---
+ trace-cmd.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/trace-cmd.c b/trace-cmd.c
+index 37199c0ff293..f0eefaabbb9e 100644
+--- a/trace-cmd.c
++++ b/trace-cmd.c
+@@ -351,7 +351,7 @@ int main (int argc, char **argv)
+ 		if (!events && !tracer && !options && !plug && !plug_op && !funcs) {
+ 			printf("events:\n");
+ 			show_events();
+-			printf("\tracers:\n");
++			printf("\ntracers:\n");
+ 			show_tracers();
+ 			printf("\noptions:\n");
+ 			show_options();
+-- 
+2.4.3
+
