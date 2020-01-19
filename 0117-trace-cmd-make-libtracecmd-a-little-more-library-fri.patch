@@ -1,0 +1,301 @@
+From 9b01bd9aa474c58c725388e8533b0d0a8d269e57 Mon Sep 17 00:00:00 2001
+From: Josef Bacik <jbacik@fb.com>
+Date: Fri, 20 Nov 2015 15:57:24 -0500
+Subject: [PATCH 117/134] trace-cmd: make libtracecmd a little more library
+ friendly
+
+Whenever you link against libtracecmd you will get a bunch of debugging output
+if you don't provide your own pr_stat().  So instead default to no output if we
+don't provide a pr_stat().  Thanks,
+
+Link: http://lkml.kernel.org/r/1448053053-24188-3-git-send-email-jbacik@fb.com
+
+Signed-off-by: Josef Bacik <jbacik@fb.com>
+[ Added missed updates for make gui ]
+Signed-off-by: Steven Rostedt <rostedt@goodmis.org>
+---
+ ctracecmd.i        | 1 +
+ kernel-shark.c     | 1 +
+ parse-utils.c      | 6 ------
+ plugin_function.c  | 1 +
+ trace-capture.c    | 1 +
+ trace-cmd-local.h  | 1 +
+ trace-cmd.c        | 1 +
+ trace-cmd.h        | 2 --
+ trace-graph-main.c | 2 ++
+ trace-graph.c      | 1 +
+ trace-hooks.c      | 2 ++
+ trace-local.h      | 1 +
+ trace-msg.c        | 1 +
+ trace-plot-cpu.c   | 1 +
+ trace-plot-task.c  | 1 +
+ trace-plot.c       | 1 +
+ trace-recorder.c   | 1 +
+ trace-util.c       | 1 +
+ trace-view-main.c  | 1 +
+ trace-view.c       | 1 +
+ 20 files changed, 20 insertions(+), 8 deletions(-)
+
+diff --git a/ctracecmd.i b/ctracecmd.i
+index e91d068ef7bd..ba32d3b3e4ac 100644
+--- a/ctracecmd.i
++++ b/ctracecmd.i
+@@ -15,6 +15,7 @@
+ 
+ %{
+ #include "trace-cmd.h"
++#include "event-utils.h"
+ %}
+ 
+ 
+diff --git a/kernel-shark.c b/kernel-shark.c
+index 2198d204bf3a..c9523026aa59 100644
+--- a/kernel-shark.c
++++ b/kernel-shark.c
+@@ -18,6 +18,7 @@
+  * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  */
+ #include <stdio.h>
++#include <stdlib.h>
+ #include <string.h>
+ #include <stdarg.h>
+ #include <fcntl.h>
+diff --git a/parse-utils.c b/parse-utils.c
+index 6926814a0b50..42c18850a107 100644
+--- a/parse-utils.c
++++ b/parse-utils.c
+@@ -67,14 +67,8 @@ void __pr_stat(const char *fmt, ...)
+ 
+ void __weak vpr_stat(const char *fmt, va_list ap)
+ {
+-	__vpr_stat(fmt, ap);
+ }
+ 
+ void __weak pr_stat(const char *fmt, ...)
+ {
+-	va_list ap;
+-
+-	va_start(ap, fmt);
+-	__vpr_stat(fmt, ap);
+-	va_end(ap);
+ }
+diff --git a/plugin_function.c b/plugin_function.c
+index 02cfd43cd8cf..1e88a7f73caf 100644
+--- a/plugin_function.c
++++ b/plugin_function.c
+@@ -22,6 +22,7 @@
+ #include <string.h>
+ 
+ #include "trace-cmd.h"
++#include "event-utils.h"
+ 
+ static struct func_stack {
+ 	int size;
+diff --git a/trace-capture.c b/trace-capture.c
+index ced0e30debdb..1acfe4477b28 100644
+--- a/trace-capture.c
++++ b/trace-capture.c
+@@ -18,6 +18,7 @@
+  * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  */
+ #include <stdio.h>
++#include <stdlib.h>
+ #include <string.h>
+ #include <stdarg.h>
+ #include <fcntl.h>
+diff --git a/trace-cmd-local.h b/trace-cmd-local.h
+index 051a4706f26e..9412f9d333ba 100644
+--- a/trace-cmd-local.h
++++ b/trace-cmd-local.h
+@@ -23,6 +23,7 @@
+ /* Local for trace-input.c and trace-output.c */
+ 
+ #include "trace-cmd.h"
++#include "event-utils.h"
+ 
+ static ssize_t __do_write(int fd, const void *data, size_t size)
+ {
+diff --git a/trace-cmd.c b/trace-cmd.c
+index 758671eb8679..f7ea5f205d73 100644
+--- a/trace-cmd.c
++++ b/trace-cmd.c
+@@ -23,6 +23,7 @@
+ #include <unistd.h>
+ #include <dirent.h>
+ #include <errno.h>
++#include <stdlib.h>
+ 
+ #include "trace-local.h"
+ 
+diff --git a/trace-cmd.h b/trace-cmd.h
+index b779ede501c0..5c961088cdbf 100644
+--- a/trace-cmd.h
++++ b/trace-cmd.h
+@@ -20,8 +20,6 @@
+ #ifndef _TRACE_CMD_H
+ #define _TRACE_CMD_H
+ 
+-#include <stdlib.h>
+-#include "event-utils.h"
+ #include "event-parse.h"
+ 
+ #define TRACECMD_ERR_MSK	((unsigned long)(-1) & ~((1UL << 14) - 1))
+diff --git a/trace-graph-main.c b/trace-graph-main.c
+index 7215d9a9a67f..58076a988a58 100644
+--- a/trace-graph-main.c
++++ b/trace-graph-main.c
+@@ -17,6 +17,7 @@
+  *
+  * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  */
++#include <stdlib.h>
+ #include <gtk/gtk.h>
+ #include <getopt.h>
+ #include <string.h>
+@@ -26,6 +27,7 @@
+ #include <libgen.h>
+ 
+ #include "trace-cmd.h"
++#include "event-utils.h"
+ #include "trace-graph.h"
+ #include "trace-filter.h"
+ #include "trace-gui.h"
+diff --git a/trace-graph.c b/trace-graph.c
+index bfb0525da58d..1db342f329c4 100644
+--- a/trace-graph.c
++++ b/trace-graph.c
+@@ -18,6 +18,7 @@
+  * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  */
+ #include <stdio.h>
++#include <stdlib.h>
+ #include <string.h>
+ #include <stdarg.h>
+ #include <fcntl.h>
+diff --git a/trace-hooks.c b/trace-hooks.c
+index 4238f83cb984..5b8a4d4e3014 100644
+--- a/trace-hooks.c
++++ b/trace-hooks.c
+@@ -19,9 +19,11 @@
+  */
+ 
+ #include <stdio.h>
++#include <stdlib.h>
+ #include <ctype.h>
+ 
+ #include "trace-cmd.h"
++#include "event-utils.h"
+ 
+ struct hook_list *tracecmd_create_event_hook(const char *arg)
+ {
+diff --git a/trace-local.h b/trace-local.h
+index 13d23a2cfcf1..aa032218a506 100644
+--- a/trace-local.h
++++ b/trace-local.h
+@@ -24,6 +24,7 @@
+ #include <dirent.h>	/* for DIR */
+ 
+ #include "trace-cmd.h"
++#include "event-utils.h"
+ 
+ extern int debug;
+ 
+diff --git a/trace-msg.c b/trace-msg.c
+index 0fc55204ebc3..f1b65467124f 100644
+--- a/trace-msg.c
++++ b/trace-msg.c
+@@ -28,6 +28,7 @@
+ #include <limits.h>
+ #include <stddef.h>
+ #include <stdio.h>
++#include <stdlib.h>
+ #include <unistd.h>
+ #include <arpa/inet.h>
+ #include <sys/types.h>
+diff --git a/trace-plot-cpu.c b/trace-plot-cpu.c
+index 2a7d1a86f251..8374809f7205 100644
+--- a/trace-plot-cpu.c
++++ b/trace-plot-cpu.c
+@@ -17,6 +17,7 @@
+  *
+  * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  */
++#include <stdlib.h>
+ #include <string.h>
+ 
+ #include "trace-graph.h"
+diff --git a/trace-plot-task.c b/trace-plot-task.c
+index b333ce589c43..3b7e81f5e1e5 100644
+--- a/trace-plot-task.c
++++ b/trace-plot-task.c
+@@ -17,6 +17,7 @@
+  *
+  * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  */
++#include <stdlib.h>
+ #include <string.h>
+ 
+ #include "trace-graph.h"
+diff --git a/trace-plot.c b/trace-plot.c
+index 85a7a77564fb..dc5b3af9e890 100644
+--- a/trace-plot.c
++++ b/trace-plot.c
+@@ -17,6 +17,7 @@
+  *
+  * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  */
++#include <stdlib.h>
+ #include <string.h>
+ #include "trace-graph.h"
+ #include "trace-local.h"
+diff --git a/trace-recorder.c b/trace-recorder.c
+index 49b04ea411f3..1b9d364c34a7 100644
+--- a/trace-recorder.c
++++ b/trace-recorder.c
+@@ -34,6 +34,7 @@
+ #include <errno.h>
+ 
+ #include "trace-cmd.h"
++#include "event-utils.h"
+ 
+ struct tracecmd_recorder {
+ 	int		fd;
+diff --git a/trace-util.c b/trace-util.c
+index 40d0c295d37f..cb8ada158f92 100644
+--- a/trace-util.c
++++ b/trace-util.c
+@@ -32,6 +32,7 @@
+ #include <sys/stat.h>
+ 
+ #include "trace-cmd.h"
++#include "event-utils.h"
+ 
+ #define LOCAL_PLUGIN_DIR ".trace-cmd/plugins"
+ #define TRACEFS_PATH "/sys/kernel/tracing"
+diff --git a/trace-view-main.c b/trace-view-main.c
+index 71eff7234b9f..56a5a3415555 100644
+--- a/trace-view-main.c
++++ b/trace-view-main.c
+@@ -26,6 +26,7 @@
+ #include <libgen.h>
+ 
+ #include "trace-cmd.h"
++#include "event-utils.h"
+ #include "trace-view.h"
+ #include "trace-xml.h"
+ #include "trace-filter.h"
+diff --git a/trace-view.c b/trace-view.c
+index 544698f04005..9a8f8d5c1782 100644
+--- a/trace-view.c
++++ b/trace-view.c
+@@ -18,6 +18,7 @@
+  * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  */
+ #include <stdio.h>
++#include <stdlib.h>
+ #include <string.h>
+ #include <stdarg.h>
+ #include <gtk/gtk.h>
+-- 
+2.5.5
+

@@ -34,6 +34,36 @@ static int python_callback(struct trace_seq *s,
 			   struct event_format *event,
 			   void *context);
 
+static int skip_output = 0;
+
+static void py_supress_trace_output(void)
+{
+	skip_output = 1;
+}
+
+void pr_stat(const char *fmt, ...)
+{
+        va_list ap;
+
+	if (skip_output)
+		return;
+	va_start(ap, fmt);
+	__vpr_stat(fmt, ap);
+	va_end(ap);
+}
+
+void warning(const char *fmt, ...)
+{
+	va_list ap;
+
+	if (skip_output)
+		return;
+
+	va_start(ap, fmt);
+	__vwarning(fmt, ap);
+	va_end(ap);
+}
+
 PyObject *convert_pevent(unsigned long pevent)
 {
 	void *pev = (void *)pevent;
@@ -47,6 +77,43 @@ void py_pevent_register_event_handler(struct pevent *pevent, int id,
 	Py_INCREF(pyfunc);
 	pevent_register_event_handler(pevent, id, subsys, evname,
 				      python_callback, pyfunc);
+}
+
+static PyObject *py_field_get_stack(struct pevent *pevent,
+				    struct pevent_record *record,
+				    struct event_format *event,
+				    int long_size)
+{
+	PyObject *list;
+	struct format_field *field;
+	void *data = record->data;
+	const char *func = NULL;
+	unsigned long addr;
+
+	field = pevent_find_any_field(event, "caller");
+	if (!field) {
+		PyErr_SetString(PyExc_TypeError,
+				"Event doesn't have caller field");
+		return NULL;
+	}
+
+	list = PyList_New(0);
+
+	for (data += field->offset; data < record->data + record->size;
+	     data += long_size) {
+		addr = pevent_read_number(event->pevent, data, long_size);
+
+		if ((long_size == 8 && addr == (unsigned long long)-1) ||
+		    ((int)addr == -1))
+			break;
+		func = pevent_find_function(event->pevent, addr);
+		if (PyList_Append(list, PyString_FromString(func))) {
+			Py_DECREF(list);
+			return NULL;
+		}
+	}
+
+	return list;
 }
 
 static PyObject *py_field_get_data(struct format_field *f, struct pevent_record *r)

@@ -338,7 +338,7 @@ static int parse_cpu(struct tracecmd_input *handle,
 static double parse_file(struct tracecmd_input *handle,
 			 const char *output_file,
 			 unsigned long long start,
-			 unsigned long long end, int percpu,
+			 unsigned long long end, int percpu, int only_cpu,
 			 int count, enum split_types type)
 {
 	unsigned long long current;
@@ -375,7 +375,10 @@ static double parse_file(struct tracecmd_input *handle,
 			tracecmd_set_cpu_to_timestamp(handle, cpu, start);
 	}
 
-	if (percpu) {
+	if (only_cpu >= 0) {
+		parse_cpu(handle, cpu_data, start, end, count,
+			  1, only_cpu, type);
+	} else if (percpu) {
 		for (cpu = 0; cpu < cpus; cpu++)
 			parse_cpu(handle, cpu_data, start,
 				  end, count, percpu, cpu, type);
@@ -412,7 +415,6 @@ static double parse_file(struct tracecmd_input *handle,
 void trace_split (int argc, char **argv)
 {
 	struct tracecmd_input *handle;
-	struct pevent *pevent;
 	unsigned long long start_ns = 0, end_ns = 0;
 	unsigned long long current;
 	double start, end;
@@ -514,9 +516,10 @@ void trace_split (int argc, char **argv)
 	if (!handle)
 		die("error reading %s", input_file);
 
-	page_size = tracecmd_page_size(handle);
+	if (tracecmd_get_flags(handle) & TRACECMD_FL_LATENCY)
+		die("trace-cmd split does not work with latency traces\n");
 
-	pevent = tracecmd_get_pevent(handle);
+	page_size = tracecmd_page_size(handle);
 
 	if (!output)
 		output = strdup(input_file);
@@ -537,7 +540,7 @@ void trace_split (int argc, char **argv)
 			strcpy(output_file, output);
 			
 		current = parse_file(handle, output_file, start_ns, end_ns,
-				     percpu, count, type);
+				     percpu, cpu, count, type);
 		if (!repeat)
 			break;
 		start_ns = 0;

@@ -1,0 +1,33 @@
+From e19a601a7ab6d33914768972be41951261b95a19 Mon Sep 17 00:00:00 2001
+From: "Steven Rostedt (Red Hat)" <rostedt@goodmis.org>
+Date: Tue, 1 Dec 2015 15:35:03 -0500
+Subject: [PATCH 019/134] trace-cmd: Never update saved files when keep is set
+ for recording
+
+If -k is set on the command line, not only do not update the reset_files
+list, but also do not call the update of the file even if the reset_files
+has something in it. This allows for reset_save_file() to be used during the
+parameter parsing before -k may be used.
+
+Signed-off-by: Steven Rostedt <rostedt@goodmis.org>
+---
+ trace-record.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/trace-record.c b/trace-record.c
+index a3ff6a33328d..cf30176cd47c 100644
+--- a/trace-record.c
++++ b/trace-record.c
+@@ -1684,7 +1684,8 @@ static void update_reset_files(void)
+ 		reset = reset_files;
+ 		reset_files = reset->next;
+ 
+-		write_file(reset->path, reset->reset, "reset");
++		if (!keep)
++			write_file(reset->path, reset->reset, "reset");
+ 		free(reset->path);
+ 		free(reset->reset);
+ 		free(reset);
+-- 
+2.5.5
+

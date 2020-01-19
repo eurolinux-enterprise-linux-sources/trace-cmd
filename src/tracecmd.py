@@ -117,6 +117,10 @@ class Event(object, DictMixin):
             return None
         return py_field_get_str(f, self._record)
 
+    def stack_field(self, long_size):
+        return py_field_get_stack(self._pevent, self._record, self._format,
+                                  long_size)
+
 class TraceSeq(object):
     def __init__(self, trace_seq):
         self._trace_seq = trace_seq
@@ -192,6 +196,10 @@ class Trace(object):
     def cpus(self):
         return tracecmd_cpus(self._handle)
 
+    @cached_property
+    def long_size(self):
+        return tracecmd_long_size(self._handle)
+
     def read_event(self, cpu):
         rec = tracecmd_read_data(self._handle, cpu)
         if rec:
@@ -210,6 +218,15 @@ class Trace(object):
         type = pevent_data_type(self._pevent, rec)
         format = pevent_data_event_from_type(self._pevent, type)
         # rec ownership goes over to Event instance
+        return Event(self._pevent, rec, format)
+
+    def read_next_event(self):
+        res = tracecmd_read_next_data(self._handle)
+        if isinstance(res, int):
+            return None
+        rec, cpu = res
+        type = pevent_data_type(self._pevent, rec)
+        format = pevent_data_event_from_type(self._pevent, type)
         return Event(self._pevent, rec, format)
 
     def peek_event(self, cpu):

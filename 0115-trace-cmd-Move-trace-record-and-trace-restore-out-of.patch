@@ -1,0 +1,42 @@
+From e131b50e72575b5526b592f16a3ad07748be5f11 Mon Sep 17 00:00:00 2001
+From: "Steven Rostedt (Red Hat)" <rostedt@goodmis.org>
+Date: Mon, 21 Nov 2016 12:13:41 -0500
+Subject: [PATCH 115/134] trace-cmd: Move trace-record and trace-restore out of
+ library
+
+The "main" functions should not be in the library, and trace-record and
+trace-restore both have them. Put them back into the TRACE_CMD_OBJS and
+figure out what breaks later.
+
+Signed-off-by: Steven Rostedt <rostedt@goodmis.org>
+---
+ Makefile | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/Makefile b/Makefile
+index 0a9c1952695f..15095b65e62f 100644
+--- a/Makefile
++++ b/Makefile
+@@ -331,7 +331,7 @@ TRACE_GUI_OBJS = trace-filter.o trace-compat.o trace-filter-hash.o trace-dialog.
+ 		trace-xml.o
+ TRACE_CMD_OBJS = trace-cmd.o trace-record.o trace-read.o trace-split.o trace-listen.o \
+ 	 trace-stack.o trace-hist.o trace-mem.o trace-snapshot.o trace-stat.o \
+-	 trace-hash.o trace-profile.o trace-stream.o
++	 trace-hash.o trace-profile.o trace-stream.o trace-record.o trace-restore.o
+ TRACE_VIEW_OBJS = trace-view.o trace-view-store.o
+ TRACE_GRAPH_OBJS = trace-graph.o trace-plot.o trace-plot-cpu.o trace-plot-task.o
+ TRACE_VIEW_MAIN_OBJS = trace-view-main.o $(TRACE_VIEW_OBJS) $(TRACE_GUI_OBJS)
+@@ -341,8 +341,8 @@ KERNEL_SHARK_OBJS = $(TRACE_VIEW_OBJS) $(TRACE_GRAPH_OBJS) $(TRACE_GUI_OBJS) \
+ 
+ PEVENT_LIB_OBJS = event-parse.o trace-seq.o parse-filter.o parse-utils.o str_error_r.o
+ TCMD_LIB_OBJS = $(PEVENT_LIB_OBJS) trace-util.o trace-input.o trace-ftrace.o \
+-			trace-output.o trace-record.o trace-recorder.o \
+-			trace-restore.o trace-usage.o trace-blk-hack.o \
++			trace-output.o trace-recorder.o \
++			trace-usage.o trace-blk-hack.o \
+ 			kbuffer-parse.o event-plugin.o trace-hooks.o \
+ 			trace-msg.o
+ 
+-- 
+2.5.5
+

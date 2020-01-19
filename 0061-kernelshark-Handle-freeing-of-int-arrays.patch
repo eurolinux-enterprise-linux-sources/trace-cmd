@@ -1,0 +1,55 @@
+From 7477e7057e201466b2fa801f7a47ff5976cb06ab Mon Sep 17 00:00:00 2001
+From: "Steven Rostedt (Red Hat)" <rostedt@goodmis.org>
+Date: Wed, 16 Mar 2016 11:42:49 -0400
+Subject: [PATCH 061/134] kernelshark: Handle freeing of int arrays
+
+Having the hard irq integer arrays be set to null_int_array requires that
+they are not freed with the normal free() function, but needs to check that
+they have been allocated and does not equal to the null_int_array variable.
+
+Signed-off-by: Steven Rostedt <rostedt@goodmis.org>
+---
+ trace-graph.c | 20 +++++++++++---------
+ 1 file changed, 11 insertions(+), 9 deletions(-)
+
+diff --git a/trace-graph.c b/trace-graph.c
+index 745142fce2af..0eb74ff46442 100644
+--- a/trace-graph.c
++++ b/trace-graph.c
+@@ -2513,6 +2513,13 @@ create_graph_info(struct graph_info *ginfo)
+ 	return info;
+ }
+ 
++static void free_int_array(int **array)
++{
++	if (*array != null_int_array)
++		free(*array);
++	*array = NULL;
++}
++
+ void trace_graph_free_info(struct graph_info *ginfo)
+ {
+ 	if (ginfo->handle) {
+@@ -2525,15 +2532,10 @@ void trace_graph_free_info(struct graph_info *ginfo)
+ 	}
+ 	ginfo->handle = NULL;
+ 
+-	free(ginfo->hard_irq_entry_ids);
+-	free(ginfo->hard_irq_exit_ids);
+-	free(ginfo->soft_irq_entry_ids);
+-	free(ginfo->soft_irq_exit_ids);
+-
+-	ginfo->hard_irq_entry_ids = NULL;
+-	ginfo->hard_irq_exit_ids = NULL;
+-	ginfo->soft_irq_entry_ids = NULL;
+-	ginfo->soft_irq_exit_ids = NULL;
++	free_int_array(&ginfo->hard_irq_entry_ids);
++	free_int_array(&ginfo->hard_irq_exit_ids);
++	free_int_array(&ginfo->soft_irq_entry_ids);
++	free_int_array(&ginfo->soft_irq_exit_ids);
+ }
+ 
+ static int load_handle(struct graph_info *ginfo,
+-- 
+2.5.5
+

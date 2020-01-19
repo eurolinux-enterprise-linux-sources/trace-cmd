@@ -84,6 +84,14 @@ OPTIONS
 
     The above are usually safe to use to compare fields.
 
+*-R* 'trigger'::
+    Specify a trigger for the previous event. This must come after a *-e*. 
+    This will add a given trigger to the given event. To only enable the trigger
+    and not the event itself, then place the event after the *-v* option.
+
+    See Documentation/trace/events.txt in the Linux kernel source for more
+    information on triggers.
+
 *-v*::
     This will cause all events specified after it on the command line to not
     be traced. This is useful for selecting a subsystem to be traced but to
@@ -105,6 +113,11 @@ OPTIONS
 
 *-c*::
      Used with either *-F* to trace the process' children too.
+
+*-C* 'clock'::
+     Set the trace clock to "clock".
+
+     Use trace-cmd(1) list -C to see what clocks are available.
 
 *-o* 'output-file'::
     By default, trace-cmd report will create a 'trace.dat' file. You can
@@ -132,6 +145,16 @@ OPTIONS
     Some tracer plugins enable the function tracer by default. Like the
     latency tracers. This option prevents the function tracer from being
     enabled at start up.
+
+*-D*::
+    The option *-d* will try to use the function-trace option to disable the
+    function tracer (if available), otherwise it defaults to the proc file:
+    /proc/sys/kernel/ftrace_enabled, but will not touch it if the function-trace
+    option is available.  The *-D* option will disable both the ftrace_enabled
+    proc file as well as the function-trace option if it exists.
+
+    Note, this disable function tracing for all users, which includes users
+    outside of ftrace tracers (stack_tracer, perf, etc).
 
 *-O* 'option'::
     Ftrace has various options that can be enabled or disabled. This allows
@@ -164,6 +187,44 @@ OPTIONS
     ring buffer is per CPU, this size is the size of each per CPU ring buffer
     inside the kernel. Using "-b 10000" on a machine with 4 CPUs will make
     Ftrace have a total buffer size of 40 Megs.
+
+*-B* 'buffer-name'::
+    If the kernel supports multiple buffers, this will add a buffer with
+    the given name. If the buffer name already exists, that buffer is just
+    reset and will not be deleted at the end of record execution. If the
+    buffer is created, it will be removed at the end of execution (unless
+    the *-k* is set, or 'start' command was used).
+
+    After a buffer name is stated, all events added after that will be
+    associated with that buffer. If no buffer is specified, or an event
+    is specified before a buffer name, it will be associated with the
+    main (toplevel) buffer.
+
+     trace-cmd record -e sched -B block -e block -B time -e timer sleep 1
+
+    The above is will enable all sched events in the main buffer. It will
+    then create a 'block' buffer instance and enable all block events within
+    that buffer. A 'time' buffer instance is created and all timer events
+    will be enabled for that event.
+
+*-m* 'size'::
+    The max size in kilobytes that a per cpu buffer should be. Note, due
+    to rounding to page size, the number may not be totally correct.
+    Also, this is performed by switching between two buffers that are half
+    the given size thus the output may not be of the given size even if
+    much more was written.
+
+    Use this to prevent running out of diskspace for long runs.
+
+*-M* 'cpumask'::
+    Set the cpumask for to trace. It only affects the last buffer instance
+    given. If supplied before any buffer instance, then it affects the
+    main buffer. The value supplied must be a hex number.
+
+     trace-cmd record -p function -M c -B events13 -e all -M 5
+
+    If the -M is left out, then the mask stays the same. To enable all
+    CPUs, pass in a value of '-1'.
 
 *-k*::
     By default, when trace-cmd is finished tracing, it will reset the buffers
@@ -201,6 +262,34 @@ OPTIONS
     trace buffer after it has finished recording. It will then map the
     timestamp to gettimeofday which will allow wall time output from the
     timestamps reading the created 'trace.dat' file.
+
+*--profile*::
+    With the *--profile* option, "trace-cmd" will enable tracing that can
+    be used with trace-cmd-report(1) --profile option. If a tracer *-p* is
+    not set, and function graph depth is supported by the kernel, then
+    the function_graph tracer will be enabled with a depth of one (only
+    show where userspace enters into the kernel). It will also enable
+    various tracepoints with stack tracing such that the report can show
+    where tasks have been blocked for the longest time.
+
+    See trace-cmd-profile(1) for more details and examples.
+
+*-H* 'event-hooks'::
+    Add custom event matching to connect any two events together. When not
+    used with *--profile*, it will save the parameter and this will be
+    used by trace-cmd report --profile, too. That is:
+
+    trace-cmd record -H hrtimer_expire_entry,hrtimer/hrtimer_expire_exit,hrtimer,sp
+    trace-cmd report --profile
+
+    Will profile hrtimer_expire_entry and hrtimer_expire_ext times.
+
+    See trace-cmd-profile(1) for format.
+
+*--stderr*::
+    Have output go to stderr instead of stdout, but the output of the command
+    executed will not be changed. This is useful if you want to monitor the
+    output of the command being executed, but not see the output from trace-cmd.
 
 EXAMPLES
 --------
@@ -260,11 +349,48 @@ Here is a nice way to find what interrupts have the highest latency:
 
 ------------------------------------------
 
+An example of the profile:
+------------------------------------------
+ # trace-cmd record --profile sleep 1
+ # trace-cmd report --profile --comm sleep
+task: sleep-21611
+  Event: sched_switch:R (1) Total: 99442 Avg: 99442 Max: 99442 Min:99442
+     <stack> 1 total:99442 min:99442 max:99442 avg=99442
+       => ftrace_raw_event_sched_switch (0xffffffff8105f812)
+       => __schedule (0xffffffff8150810a)
+       => preempt_schedule (0xffffffff8150842e)
+       => ___preempt_schedule (0xffffffff81273354)
+       => cpu_stop_queue_work (0xffffffff810b03c5)
+       => stop_one_cpu (0xffffffff810b063b)
+       => sched_exec (0xffffffff8106136d)
+       => do_execve_common.isra.27 (0xffffffff81148c89)
+       => do_execve (0xffffffff811490b0)
+       => SyS_execve (0xffffffff811492c4)
+       => return_to_handler (0xffffffff8150e3c8)
+       => stub_execve (0xffffffff8150c699)
+  Event: sched_switch:S (1) Total: 1000506680 Avg: 1000506680 Max: 1000506680 Min:1000506680
+     <stack> 1 total:1000506680 min:1000506680 max:1000506680 avg=1000506680
+       => ftrace_raw_event_sched_switch (0xffffffff8105f812)
+       => __schedule (0xffffffff8150810a)
+       => schedule (0xffffffff815084b8)
+       => do_nanosleep (0xffffffff8150b22c)
+       => hrtimer_nanosleep (0xffffffff8108d647)
+       => SyS_nanosleep (0xffffffff8108d72c)
+       => return_to_handler (0xffffffff8150e3c8)
+       => tracesys_phase2 (0xffffffff8150c304)
+  Event: sched_wakeup:21611 (1) Total: 30326 Avg: 30326 Max: 30326 Min:30326
+     <stack> 1 total:30326 min:30326 max:30326 avg=30326
+       => ftrace_raw_event_sched_wakeup_template (0xffffffff8105f653)
+       => ttwu_do_wakeup (0xffffffff810606eb)
+       => ttwu_do_activate.constprop.124 (0xffffffff810607c8)
+       => try_to_wake_up (0xffffffff8106340a)
+------------------------------------------
+
 SEE ALSO
 --------
 trace-cmd(1), trace-cmd-report(1), trace-cmd-start(1), trace-cmd-stop(1),
 trace-cmd-extract(1), trace-cmd-reset(1), trace-cmd-split(1),
-trace-cmd-list(1), trace-cmd-listen(1)
+trace-cmd-list(1), trace-cmd-listen(1), trace-cmd-profile(1)
 
 AUTHOR
 ------

@@ -1,0 +1,28 @@
+From 5a0e67bc510d7644f8157be27e345a652f4db632 Mon Sep 17 00:00:00 2001
+From: "Steven Rostedt (VMware)" <rostedt@goodmis.org>
+Date: Thu, 16 Feb 2017 20:23:01 -0500
+Subject: [PATCH 127/134] trace-cmd: Remove include of string.h from
+ event-utils.h
+
+string.h is not needed in event-utils.h. Remove it.
+
+Signed-off-by: Steven Rostedt (VMware) <rostedt@goodmis.org>
+---
+ event-utils.h | 1 -
+ 1 file changed, 1 deletion(-)
+
+diff --git a/event-utils.h b/event-utils.h
+index a8c8b6bcae15..d1dc2170e402 100644
+--- a/event-utils.h
++++ b/event-utils.h
+@@ -20,7 +20,6 @@
+ #ifndef __UTIL_H
+ #define __UTIL_H
+ 
+-#include <string.h>
+ #include <ctype.h>
+ 
+ /* Can be overridden */
+-- 
+2.5.5
+

@@ -1,0 +1,74 @@
+From 57653fbada3060ce4aecd9361ccba0689672c49d Mon Sep 17 00:00:00 2001
+From: "Steven Rostedt (Red Hat)" <rostedt@goodmis.org>
+Date: Fri, 16 Sep 2016 14:41:51 -0400
+Subject: [PATCH 105/134] trace-cmd msg: Add msg_write() helper for
+ msg_do_write_check()
+
+As the special cases in msg_do_write_check() do basically the same thing,
+add a helper function to be called by them instead.
+
+Signed-off-by: Steven Rostedt <rostedt@goodmis.org>
+---
+ trace-msg.c | 36 +++++++++++++++---------------------
+ 1 file changed, 15 insertions(+), 21 deletions(-)
+
+diff --git a/trace-msg.c b/trace-msg.c
+index 4e700bfcda69..0fc55204ebc3 100644
+--- a/trace-msg.c
++++ b/trace-msg.c
+@@ -132,37 +132,31 @@ struct tracecmd_msg {
+ 
+ struct tracecmd_msg *errmsg;
+ 
++static int msg_write(int fd, struct tracecmd_msg *msg, int size, void *addr)
++{
++	int ret;
++
++	ret = __do_write_check(fd, msg, size);
++	if (ret < 0)
++		return ret;
++	if (ntohl(msg->size) <= size)
++		return 0;
++	return __do_write_check(fd, addr, ntohl(msg->size) - size);
++}
++
+ static ssize_t msg_do_write_check(int fd, struct tracecmd_msg *msg)
+ {
+-	int wsize;
+ 	int ret;
+ 
+ 	switch (ntohl(msg->cmd)) {
+ 	case MSG_TINIT:
+-		wsize = MIN_TINIT_SIZE;
+-		ret = __do_write_check(fd, msg, wsize);
+-		if (ret < 0)
+-			break;
+-		if (ntohl(msg->size) <= MIN_TINIT_SIZE)
+-			break;
+-		ret = __do_write_check(fd, msg->data.tinit.opt,
+-				       ntohl(msg->size) - wsize);
++		ret = msg_write(fd, msg, MIN_TINIT_SIZE, msg->data.tinit.opt);
+ 		break;
+ 	case MSG_RINIT:
+-		wsize = MIN_RINIT_SIZE;
+-		ret = __do_write_check(fd, msg, wsize);
+-		if (ret < 0)
+-			break;
+-		ret = __do_write_check(fd, msg->data.rinit.port_array,
+-				       ntohl(msg->size) - wsize);
++		ret = msg_write(fd, msg, MIN_RINIT_SIZE, msg->data.rinit.port_array);
+ 		break;
+ 	case MSG_SENDMETA:
+-		wsize = MIN_META_SIZE;
+-		ret = __do_write_check(fd, msg, wsize);
+-		if (ret < 0)
+-			break;
+-		ret = __do_write_check(fd, msg->data.meta.buf,
+-				       ntohl(msg->size) - wsize);
++		ret = msg_write(fd, msg, MIN_META_SIZE, msg->data.meta.buf);
+ 		break;
+ 	default:
+ 		ret = __do_write_check(fd, msg, ntohl(msg->size));
+-- 
+2.5.5
+

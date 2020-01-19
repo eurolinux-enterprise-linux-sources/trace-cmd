@@ -1,0 +1,208 @@
+From 59c87643bf94b4af8e2c345165cbfe7febe15640 Mon Sep 17 00:00:00 2001
+From: "Steven Rostedt (Red Hat)" <rostedt@goodmis.org>
+Date: Tue, 23 Feb 2016 16:00:15 -0500
+Subject: [PATCH 048/134] trace-cmd report: Add --ts2secs to convert cycles
+ into seconds
+
+When using clocks such as x86-tsc, where the clock frequency is known, the
+user can convert the timestamps into readable seconds, with resolution down
+to nanoseconds.
+
+Signed-off-by: Steven Rostedt <rostedt@goodmis.org>
+---
+ Documentation/trace-cmd-report.1.txt | 24 ++++++++++++++++++++++++
+ trace-cmd.h                          |  1 +
+ trace-input.c                        | 22 +++++++++++++++++++++-
+ trace-read.c                         | 17 +++++++++++++++++
+ trace-usage.c                        |  4 ++++
+ 5 files changed, 67 insertions(+), 1 deletion(-)
+
+diff --git a/Documentation/trace-cmd-report.1.txt b/Documentation/trace-cmd-report.1.txt
+index 309e33af1cdb..c969694c5d55 100644
+--- a/Documentation/trace-cmd-report.1.txt
++++ b/Documentation/trace-cmd-report.1.txt
+@@ -262,6 +262,30 @@ OPTIONS
+     the trace. If the units are nanoseconds, the addition (or subtraction) from
+     the offset will be nanoseconds even if the displayed units are microseconds.
+ 
++*--ts2secs* HZ::
++    Convert the current clock source into a second (nanosecond resolution)
++    output. When using clocks like x86-tsc, if the frequency is known,
++    by passing in the clock frequency, this will convert the time to seconds.
++
++    This option affects any trace.dat file given with *-i* proceeding it.
++    If this option comes before any *-i* option, then that value becomes
++    the default conversion for all other trace.dat files. If another
++    --ts2secs option appears after a *-i* trace.dat file, than that option
++    will override the default value.
++
++    Example: On a 3.4 GHz machine
++
++      trace-cmd record -p function -C x86-tsc
++
++      trace-cmd report --ts2ns 3400000000
++
++     The report will convert the cycles timestamps into a readable second
++     display. The default display resolution is microseconds, unless *-t*
++     is used.
++
++     The value of --ts-offset must still be in the raw timestamp units, even
++     with this option. The offset will be converted as well.
++
+ EXAMPLES
+ --------
+ 
+diff --git a/trace-cmd.h b/trace-cmd.h
+index 526ced280e6b..4ebd5cc28385 100644
+--- a/trace-cmd.h
++++ b/trace-cmd.h
+@@ -128,6 +128,7 @@ struct tracecmd_input *tracecmd_buffer_instance_handle(struct tracecmd_input *ha
+ int tracecmd_is_buffer_instance(struct tracecmd_input *handle);
+ 
+ void tracecmd_set_ts_offset(struct tracecmd_input *handle, unsigned long long offset);
++void tracecmd_set_ts2secs(struct tracecmd_input *handle, unsigned long long hz);
+ 
+ void tracecmd_print_events(struct tracecmd_input *handle, const char *regex);
+ 
+diff --git a/trace-input.c b/trace-input.c
+index 5e6464200d0c..2fea0668bcb9 100644
+--- a/trace-input.c
++++ b/trace-input.c
+@@ -96,6 +96,7 @@ struct tracecmd_input {
+ 	bool			use_pipe;
+ 	struct cpu_data 	*cpu_data;
+ 	unsigned long long	ts_offset;
++	double			ts2secs;
+ 	char *			cpustats;
+ 	char *			uname;
+ 	struct input_buffer_instance	*buffers;
+@@ -953,6 +954,9 @@ static int update_page_info(struct tracecmd_input *handle, int cpu)
+ 	}
+ 	handle->cpu_data[cpu].timestamp = kbuffer_timestamp(kbuf) + handle->ts_offset;
+ 
++	if (handle->ts2secs)
++		handle->cpu_data[cpu].timestamp *= handle->ts2secs;
++
+ 	return 0;
+ }
+ 
+@@ -1673,6 +1677,11 @@ read_again:
+ 
+ 	handle->cpu_data[cpu].timestamp = ts + handle->ts_offset;
+ 
++	if (handle->ts2secs) {
++		handle->cpu_data[cpu].timestamp *= handle->ts2secs;
++		ts *= handle->ts2secs;
++	}
++
+ 	index = kbuffer_curr_offset(kbuf);
+ 
+ 	record = malloc(sizeof(*record));
+@@ -1939,6 +1948,16 @@ void tracecmd_set_ts_offset(struct tracecmd_input *handle,
+ 	handle->ts_offset = offset;
+ }
+ 
++void tracecmd_set_ts2secs(struct tracecmd_input *handle,
++			 unsigned long long hz)
++{
++	double ts2secs;
++
++	ts2secs = (double)NSECS_PER_SEC / (double)hz;
++	handle->ts2secs = ts2secs;
++	handle->use_trace_clock = false;
++}
++
+ static int handle_options(struct tracecmd_input *handle)
+ {
+ 	unsigned long long offset;
+@@ -2019,7 +2038,8 @@ static int handle_options(struct tracecmd_input *handle)
+ 			buffer->offset = __data2host8(handle->pevent, offset);
+ 			break;
+ 		case TRACECMD_OPTION_TRACECLOCK:
+-			handle->use_trace_clock = true;
++			if (!handle->ts2secs)
++				handle->use_trace_clock = true;
+ 			break;
+ 		case TRACECMD_OPTION_UNAME:
+ 			handle->uname = strdup(buf);
+diff --git a/trace-read.c b/trace-read.c
+index 1e1778eaa5c5..bd7e56d07bad 100644
+--- a/trace-read.c
++++ b/trace-read.c
+@@ -73,6 +73,7 @@ struct input_files {
+ 	struct list_head	list;
+ 	const char		*file;
+ 	unsigned long long	tsoffset;
++	unsigned long long	ts2secs;
+ };
+ static struct list_head input_files;
+ static struct input_files *last_input_file;
+@@ -1363,6 +1364,7 @@ static void add_hook(const char *arg)
+ }
+ 
+ enum {
++	OPT_ts2secs	= 240,
+ 	OPT_tsoffset	= 241,
+ 	OPT_bycomm	= 242,
+ 	OPT_debug	= 243,
+@@ -1394,6 +1396,8 @@ void trace_report (int argc, char **argv)
+ 	struct handle_list *handles;
+ 	enum output_type otype;
+ 	unsigned long long tsoffset = 0;
++	unsigned long long ts2secs = 0;
++	unsigned long long ts2sc;
+ 	int show_stat = 0;
+ 	int show_funcs = 0;
+ 	int show_endian = 0;
+@@ -1444,6 +1448,7 @@ void trace_report (int argc, char **argv)
+ 			{"uname", no_argument, NULL, OPT_uname},
+ 			{"by-comm", no_argument, NULL, OPT_bycomm},
+ 			{"ts-offset", required_argument, NULL, OPT_tsoffset},
++			{"ts2secs", required_argument, NULL, OPT_ts2secs},
+ 			{"help", no_argument, NULL, '?'},
+ 			{NULL, 0, NULL, 0}
+ 		};
+@@ -1593,6 +1598,13 @@ void trace_report (int argc, char **argv)
+ 		case OPT_bycomm:
+ 			trace_profile_set_merge_like_comms();
+ 			break;
++		case OPT_ts2secs:
++			ts2sc = atoll(optarg);
++			if (multi_inputs)
++				last_input_file->ts2secs = ts2sc;
++			else
++				ts2secs = ts2sc;
++			break;
+ 		case OPT_tsoffset:
+ 			tsoffset = atoll(optarg);
+ 			if (multi_inputs)
+@@ -1644,6 +1656,11 @@ void trace_report (int argc, char **argv)
+ 		if (inputs->tsoffset)
+ 			tracecmd_set_ts_offset(handle, inputs->tsoffset);
+ 
++		if (inputs->ts2secs)
++			tracecmd_set_ts2secs(handle, inputs->ts2secs);
++		else if (ts2secs)
++			tracecmd_set_ts2secs(handle, ts2secs);
++
+ 		pevent = tracecmd_get_pevent(handle);
+ 
+ 		if (nanosec)
+diff --git a/trace-usage.c b/trace-usage.c
+index ed6a913d1786..af57ea16a889 100644
+--- a/trace-usage.c
++++ b/trace-usage.c
+@@ -163,6 +163,10 @@ static struct usage_help usage_help[] = {
+ 		"          --by-comm used with --profile, merge events for related comms\n"
+ 		"          --ts-offset will add amount to timestamp of all events of the\n"
+ 		"                     previous data file.\n"
++		"          --ts2secs HZ, pass in the timestamp frequency (per second)\n"
++		"                     to convert the displayed timestamps to seconds\n"
++		"                     Affects the previous data file, unless there was no\n"
++		"                     previous data file, in which case it becomes default\n"
+ 	},
+ 	{
+ 		"stream",
+-- 
+2.5.5
+

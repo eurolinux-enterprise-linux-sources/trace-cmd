@@ -1,7 +1,7 @@
 # trace-cmd version
 TC_VERSION = 2
-TC_PATCHLEVEL = 2
-TC_EXTRAVERSION = 2
+TC_PATCHLEVEL = 6
+TC_EXTRAVERSION =
 
 # Kernel Shark version
 KS_VERSION = 0
@@ -47,6 +47,7 @@ html_install = $(prefix)/share/kernelshark/html
 html_install_SQ = '$(subst ','\'',$(html_install))'
 img_install = $(prefix)/share/kernelshark/html/images
 img_install_SQ = '$(subst ','\'',$(img_install))'
+libdir ?= lib
 
 export man_dir man_dir_SQ html_install html_install_SQ INSTALL
 export img_install img_install_SQ
@@ -56,8 +57,8 @@ ifeq ($(prefix),$(HOME))
 plugin_dir = $(HOME)/.trace-cmd/plugins
 python_dir = $(HOME)/.trace-cmd/python
 else
-plugin_dir = $(prefix)/lib/trace-cmd/plugins
-python_dir = $(prefix)/lib/trace-cmd/python
+plugin_dir = $(prefix)/$(libdir)/trace-cmd/plugins
+python_dir = $(prefix)/$(libdir)/trace-cmd/python
 PLUGIN_DIR = -DPLUGIN_DIR="$(plugin_dir)"
 PYTHON_DIR = -DPYTHON_DIR="$(python_dir)"
 PLUGIN_DIR_SQ = '$(subst ','\'',$(PLUGIN_DIR))'
@@ -80,12 +81,15 @@ ifndef NO_PYTHON
 PYTHON		:= ctracecmd.so
 PYTHON_GUI	:= ctracecmd.so ctracecmdgui.so
 
+PYTHON_VERS ?= python
+
 # Can build python?
-ifeq ($(shell sh -c "python-config --includes > /dev/null 2>&1 && echo y"), y)
+ifeq ($(shell sh -c "pkg-config --cflags $(PYTHON_VERS) > /dev/null 2>&1 && echo y"), y)
 	PYTHON_PLUGINS := plugin_python.so
 	BUILD_PYTHON := $(PYTHON) $(PYTHON_PLUGINS)
 	PYTHON_SO_INSTALL := ctracecmd.install
-	PYTHON_PY_INSTALL := event-viewer.install tracecmd.install tracecmdgui.install
+	PYTHON_PY_PROGS := event-viewer.install
+	PYTHON_PY_LIBS := tracecmd.install tracecmdgui.install
 endif
 endif # NO_PYTHON
 
@@ -212,23 +216,40 @@ export Q VERBOSE
 TRACECMD_VERSION = $(TC_VERSION).$(TC_PATCHLEVEL).$(TC_EXTRAVERSION)
 KERNELSHARK_VERSION = $(KS_VERSION).$(KS_PATCHLEVEL).$(KS_EXTRAVERSION)
 
-INCLUDES = -I. $(CONFIG_INCLUDES)
+INCLUDES = -I. -I $(srctree)/../../include $(CONFIG_INCLUDES)
 
-include features.mk
+include $(src)/features.mk
 
 # Set compile option CFLAGS if not set elsewhere
-CFLAGS ?= -g -Wall -D_GNU_SOURCE
+CFLAGS ?= -g -Wall
+CPPFLAGS ?=
 LDFLAGS ?=
+
+# Required CFLAGS
+override CFLAGS += -D_GNU_SOURCE
 
 ifndef NO_PTRACE
 ifneq ($(call try-cc,$(SOURCE_PTRACE),),y)
 	NO_PTRACE = 1
-	CFLAGS += -DWARN_NO_PTRACE
+	override CFLAGS += -DWARN_NO_PTRACE
 endif
 endif
 
 ifdef NO_PTRACE
-CFLAGS += -DNO_PTRACE
+override CFLAGS += -DNO_PTRACE
+endif
+
+ifndef NO_AUDIT
+ifneq ($(call try-cc,$(SOURCE_AUDIT),-laudit),y)
+	NO_AUDIT = 1
+	override CFLAGS += -DWARN_NO_AUDIT
+endif
+endif
+
+ifdef NO_AUDIT
+override CFLAGS += -DNO_AUDIT
+else
+LIBS += -laudit
 endif
 
 # Append required CFLAGS
@@ -258,7 +279,7 @@ endif
 
 do_fpic_compile =					\
 	($(print_fpic_compile)				\
-	$(CC) -c $(CFLAGS) $(EXT) -fPIC $< -o $@)
+	$(CC) -c $(CPPFLAGS) $(CFLAGS) $(EXT) -fPIC $< -o $@)
 
 do_app_build =						\
 	($(print_app_build)				\
@@ -270,7 +291,7 @@ do_compile_shared_library =			\
 
 do_compile_plugin_obj =				\
 	($(print_plugin_obj_compile)		\
-	$(CC) -c $(CFLAGS) -fPIC -o $@ $<)
+	$(CC) -c $(CPPFLAGS) $(CFLAGS) -fPIC -o $@ $<)
 
 do_plugin_build =				\
 	($(print_plugin_build)			\
@@ -286,7 +307,7 @@ define check_gui
 		$(REBUILD_GUI);							\
 	else									\
 		$(print_compile)						\
-		$(CC) -c $(CFLAGS) $(EXT) $< -o $(obj)/$@;			\
+		$(CC) -c $(CPPFLAGS) $(CFLAGS) $(EXT) $< -o $(obj)/$@;		\
 	fi;
 endef
 
@@ -296,10 +317,11 @@ $(obj)/%.o: $(src)/%.c
 %.o: $(src)/%.c
 	$(Q)$(call check_gui)
 
-TRACE_GUI_OBJS = trace-filter.o trace-compat.o trace-hash.o trace-dialog.o \
+TRACE_GUI_OBJS = trace-filter.o trace-compat.o trace-filter-hash.o trace-dialog.o \
 		trace-xml.o
 TRACE_CMD_OBJS = trace-cmd.o trace-record.o trace-read.o trace-split.o trace-listen.o \
-	 trace-stack.o trace-options.o trace-hist.o trace-mem.o
+	 trace-stack.o trace-hist.o trace-mem.o trace-snapshot.o trace-stat.o \
+	 trace-hash.o trace-profile.o trace-stream.o
 TRACE_VIEW_OBJS = trace-view.o trace-view-store.o
 TRACE_GRAPH_OBJS = trace-graph.o trace-plot.o trace-plot-cpu.o trace-plot-task.o
 TRACE_VIEW_MAIN_OBJS = trace-view-main.o $(TRACE_VIEW_OBJS) $(TRACE_GUI_OBJS)
@@ -309,12 +331,23 @@ KERNEL_SHARK_OBJS = $(TRACE_VIEW_OBJS) $(TRACE_GRAPH_OBJS) $(TRACE_GUI_OBJS) \
 
 PEVENT_LIB_OBJS = event-parse.o trace-seq.o parse-filter.o parse-utils.o
 TCMD_LIB_OBJS = $(PEVENT_LIB_OBJS) trace-util.o trace-input.o trace-ftrace.o \
-			trace-output.o trace-recorder.o trace-restore.o trace-usage.o \
-			trace-blk-hack.o kbuffer-parse.o
+			trace-output.o trace-record.o trace-recorder.o \
+			trace-restore.o trace-usage.o trace-blk-hack.o \
+			kbuffer-parse.o event-plugin.o trace-hooks.o
 
-PLUGIN_OBJS = plugin_hrtimer.o plugin_kmem.o plugin_sched_switch.o \
-	plugin_mac80211.o plugin_jbd2.o plugin_function.o plugin_kvm.o \
-	plugin_blk.o
+PLUGIN_OBJS =
+PLUGIN_OBJS += plugin_jbd2.o
+PLUGIN_OBJS += plugin_hrtimer.o
+PLUGIN_OBJS += plugin_kmem.o
+PLUGIN_OBJS += plugin_kvm.o
+PLUGIN_OBJS += plugin_mac80211.o
+PLUGIN_OBJS += plugin_sched_switch.o
+PLUGIN_OBJS += plugin_function.o
+PLUGIN_OBJS += plugin_xen.o
+PLUGIN_OBJS += plugin_scsi.o
+PLUGIN_OBJS += plugin_cfg80211.o
+PLUGIN_OBJS += plugin_blk.o
+PLUGIN_OBJS += plugin_tlb.o
 
 PLUGINS := $(PLUGIN_OBJS:.o=.so)
 
@@ -444,10 +477,10 @@ define check_gui_deps
 		if [ $(BUILDGUI) -ne 1 ]; then			\
 			$(REBUILD_GUI);				\
 		else						\
-			$(CC) -M $(CFLAGS) $< > $@;		\
+			$(CC) -M $(CPPFLAGS) $(CFLAGS) $< > $@;	\
 		fi						\
 	elif [ $(BUILDGUI) -eq 0 ]; then			\
-		$(CC) -M $(CFLAGS) $< > $@;			\
+		$(CC) -M $(CPPFLAGS) $(CFLAGS) $< > $@;		\
 	else							\
 		echo SKIPPING $@;				\
 	fi;
@@ -502,21 +535,32 @@ define do_install
 	$(INSTALL) $1 '$(DESTDIR_SQ)$2'
 endef
 
+define do_install_data
+	$(print_install)				\
+	if [ ! -d '$(DESTDIR_SQ)$2' ]; then		\
+		$(INSTALL) -d -m 755 '$(DESTDIR_SQ)$2';	\
+	fi;						\
+	$(INSTALL) -m 644 $1 '$(DESTDIR_SQ)$2'
+endef
+
 $(PLUGINS_INSTALL): %.install : %.so force
-	$(Q)$(call do_install,$<,$(plugin_dir_SQ))
+	$(Q)$(call do_install_data,$<,$(plugin_dir_SQ))
 
 install_plugins: $(PLUGINS_INSTALL)
 
 $(PYTHON_SO_INSTALL): %.install : %.so force
+	$(Q)$(call do_install_data,$<,$(python_dir_SQ))
+
+$(PYTHON_PY_PROGS): %.install : %.py force
 	$(Q)$(call do_install,$<,$(python_dir_SQ))
 
-$(PYTHON_PY_INSTALL): %.install : %.py force
-	$(Q)$(call do_install,$<,$(python_dir_SQ))
+$(PYTHON_PY_LIBS): %.install : %.py force
+	$(Q)$(call do_install_data,$<,$(python_dir_SQ))
 
 $(PYTHON_PY_PLUGINS): %.install : %.py force
-	$(Q)$(call do_install,$<,$(plugin_dir_SQ))
+	$(Q)$(call do_install_data,$<,$(plugin_dir_SQ))
 
-install_python: $(PYTHON_SO_INSTALL) $(PYTHON_PY_INSTALL) $(PYTHON_PY_PLUGINS)
+install_python: $(PYTHON_SO_INSTALL) $(PYTHON_PY_PROGS) $(PYTHON_PY_LIBS) $(PYTHON_PY_PLUGINS)
 
 install_cmd: all_cmd install_plugins install_python
 	$(Q)$(call do_install,trace-cmd,$(bindir_SQ))
@@ -546,20 +590,20 @@ clean:
 
 ##### PYTHON STUFF #####
 
-PYTHON_INCLUDES = `python-config --includes`
-PYTHON_LDFLAGS = `python-config --ldflags` \
-		$(shell python -c "import distutils.sysconfig; print distutils.sysconfig.get_config_var('LINKFORSHARED')")
+PYTHON_INCLUDES = `pkg-config --cflags $(PYTHON_VERS)`
+PYTHON_LDFLAGS = `pkg-config --libs $(PYTHON_VERS)` \
+		$(shell python2 -c "import distutils.sysconfig; print distutils.sysconfig.get_config_var('LINKFORSHARED')")
 PYGTK_CFLAGS = `pkg-config --cflags pygtk-2.0`
 
 ctracecmd.so: $(TCMD_LIB_OBJS) ctracecmd.i
 	swig -Wall -python -noproxy ctracecmd.i
-	$(CC) -fpic -c $(PYTHON_INCLUDES)  ctracecmd_wrap.c
-	$(CC) --shared $(TCMD_LIB_OBJS) ctracecmd_wrap.o -o ctracecmd.so
+	$(CC) -fpic -c $(CPPFLAGS) $(CFLAGS) $(PYTHON_INCLUDES)  ctracecmd_wrap.c
+	$(CC) --shared $(TCMD_LIB_OBJS) $(LDFLAGS) ctracecmd_wrap.o -o ctracecmd.so
 
 ctracecmdgui.so: $(TRACE_VIEW_OBJS) $(LIB_FILE)
 	swig -Wall -python -noproxy ctracecmdgui.i
-	$(CC) -fpic -c  $(CFLAGS) $(INCLUDES) $(PYTHON_INCLUDES) $(PYGTK_CFLAGS) ctracecmdgui_wrap.c
-	$(CC) --shared $^ $(LIBS) $(CONFIG_LIBS) ctracecmdgui_wrap.o -o ctracecmdgui.so
+	$(CC) -fpic -c  $(CPPFLAGS) $(CFLAGS) $(INCLUDES) $(PYTHON_INCLUDES) $(PYGTK_CFLAGS) ctracecmdgui_wrap.c
+	$(CC) --shared $^ $(LDFLAGS) $(LIBS) $(CONFIG_LIBS) ctracecmdgui_wrap.o -o ctracecmdgui.so
 
 PHONY += python
 python: $(PYTHON)
@@ -574,11 +618,11 @@ CFLAGS_plugin_python.o += $(PYTHON_DIR_SQ)
 
 do_compile_python_plugin_obj =			\
 	($(print_plugin_obj_compile)		\
-	$(CC) -c $(CFLAGS) $(CFLAGS_$@) $(PYTHON_INCLUDES) -fPIC -o $@ $<)
+	$(CC) -c $(CPPFLAGS) $(CFLAGS) $(CFLAGS_$@) $(PYTHON_INCLUDES) -fPIC -o $@ $<)
 
 do_python_plugin_build =			\
 	($(print_plugin_build)			\
-	$(CC) $< -shared $(PYTHON_LDFLAGS) -o $@)
+	$(CC) $< -shared $(LDFLAGS) $(PYTHON_LDFLAGS) -o $@)
 
 plugin_python.o: %.o : $(src)/%.c trace_python_dir
 	$(Q)$(do_compile_python_plugin_obj)
@@ -587,6 +631,14 @@ plugin_python.so: %.so: %.o
 	$(Q)$(do_python_plugin_build)
 
 endif # skip-makefile
+
+dist:
+	git archive --format=tar --prefix=trace-cmd-$(TRACECMD_VERSION)/ HEAD \
+		> ../trace-cmd-$(TRACECMD_VERSION).tar
+	cat ../trace-cmd-$(TRACECMD_VERSION).tar | \
+		bzip2 -c9 > ../trace-cmd-$(TRACECMD_VERSION).tar.bz2
+	cat ../trace-cmd-$(TRACECMD_VERSION).tar | \
+		xz -e -c8 > ../trace-cmd-$(TRACECMD_VERSION).tar.xz
 
 PHONY += force
 force:

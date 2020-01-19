@@ -91,6 +91,7 @@ static const char *disassemble(unsigned char *insn, int len, uint64_t rip,
 	_ER(TASK_SWITCH,	9)		\
 	_ER(CPUID,		10)		\
 	_ER(HLT,		12)		\
+	_ER(INVD,		13)		\
 	_ER(INVLPG,		14)		\
 	_ER(RDPMC,		15)		\
 	_ER(RDTSC,		16)		\
@@ -115,9 +116,15 @@ static const char *disassemble(unsigned char *insn, int len, uint64_t rip,
 	_ER(MCE_DURING_VMENTRY,	41)		\
 	_ER(TPR_BELOW_THRESHOLD,43)		\
 	_ER(APIC_ACCESS,	44)		\
+	_ER(EOI_INDUCED,	45)		\
 	_ER(EPT_VIOLATION,	48)		\
 	_ER(EPT_MISCONFIG,	49)		\
-	_ER(WBINVD,		54)
+	_ER(INVEPT,		50)		\
+	_ER(PREEMPTION_TIMER,	52)		\
+	_ER(WBINVD,		54)		\
+	_ER(XSETBV,		55)		\
+	_ER(APIC_WRITE,		56)		\
+	_ER(INVPCID,		58)
 
 #define SVM_EXIT_REASONS \
 	_ER(EXIT_READ_CR0,	0x000)		\
@@ -233,25 +240,38 @@ static const char *find_exit_reason(unsigned isa, int val)
 	for (i = 0; strings[i].val >= 0; i++)
 		if (strings[i].val == val)
 			break;
-	if (strings[i].str)
-		return strings[i].str;
-	return "UNKNOWN";
+
+	return strings[i].str;
 }
 
-static int kvm_exit_handler(struct trace_seq *s, struct pevent_record *record,
-			    struct event_format *event, void *context)
+static int print_exit_reason(struct trace_seq *s, struct pevent_record *record,
+			     struct event_format *event, const char *field)
 {
 	unsigned long long isa;
 	unsigned long long val;
-	unsigned long long info1 = 0, info2 = 0;
+	const char *reason;
 
-	if (pevent_get_field_val(s, event, "exit_reason", record, &val, 1) < 0)
+	if (pevent_get_field_val(s, event, field, record, &val, 1) < 0)
 		return -1;
 
 	if (pevent_get_field_val(s, event, "isa", record, &isa, 0) < 0)
 		isa = 1;
 
-	trace_seq_printf(s, "reason %s", find_exit_reason(isa, val));
+	reason = find_exit_reason(isa, val);
+	if (reason)
+		trace_seq_printf(s, "reason %s", reason);
+	else
+		trace_seq_printf(s, "reason UNKNOWN (%llu)", val);
+	return 0;
+}
+
+static int kvm_exit_handler(struct trace_seq *s, struct pevent_record *record,
+			    struct event_format *event, void *context)
+{
+	unsigned long long info1 = 0, info2 = 0;
+
+	if (print_exit_reason(s, record, event, "exit_reason") < 0)
+		return -1;
 
 	pevent_print_num_field(s, " rip 0x%lx", event, "guest_rip", record, 1);
 
@@ -310,19 +330,13 @@ static int kvm_emulate_insn_handler(struct trace_seq *s, struct pevent_record *r
 static int kvm_nested_vmexit_inject_handler(struct trace_seq *s, struct pevent_record *record,
 					    struct event_format *event, void *context)
 {
-	unsigned long long val;
-
-	pevent_print_num_field(s, " rip %0x016llx", event, "rip", record, 1);
-
-	if (pevent_get_field_val(s, event, "exit_code", record, &val, 1) < 0)
+	if (print_exit_reason(s, record, event, "exit_code") < 0)
 		return -1;
 
-	trace_seq_printf(s, "reason %s", find_exit_reason(2, val));
-
-	pevent_print_num_field(s, " ext_inf1: %0x016llx", event, "exit_info1", record, 1);
-	pevent_print_num_field(s, " ext_inf2: %0x016llx", event, "exit_info2", record, 1);
-	pevent_print_num_field(s, " ext_int: %0x016llx", event, "exit_int_info", record, 1);
-	pevent_print_num_field(s, " ext_int_err: %0x016llx", event, "exit_int_info_err", record, 1);
+	pevent_print_num_field(s, " info1 %llx", event, "exit_info1", record, 1);
+	pevent_print_num_field(s, " info2 %llx", event, "exit_info2", record, 1);
+	pevent_print_num_field(s, " int_info %llx", event, "exit_int_info", record, 1);
+	pevent_print_num_field(s, " int_info_err %llx", event, "exit_int_info_err", record, 1);
 
 	return 0;
 }
@@ -330,7 +344,7 @@ static int kvm_nested_vmexit_inject_handler(struct trace_seq *s, struct pevent_r
 static int kvm_nested_vmexit_handler(struct trace_seq *s, struct pevent_record *record,
 				     struct event_format *event, void *context)
 {
-	pevent_print_num_field(s, " rip %0x016llx", event, "rip", record, 1);
+	pevent_print_num_field(s, "rip %lx ", event, "rip", record, 1);
 
 	return kvm_nested_vmexit_inject_handler(s, record, event, context);
 }
@@ -410,6 +424,16 @@ static int kvm_mmu_get_page_handler(struct trace_seq *s, struct pevent_record *r
 	return kvm_mmu_print_role(s, record, event, context);
 }
 
+#define PT_WRITABLE_SHIFT 1
+#define PT_WRITABLE_MASK (1ULL << PT_WRITABLE_SHIFT)
+
+static unsigned long long
+process_is_writable_pte(struct trace_seq *s, unsigned long long *args)
+{
+	unsigned long pte = args[0];
+	return pte & PT_WRITABLE_MASK;
+}
+
 int PEVENT_PLUGIN_LOADER(struct pevent *pevent)
 {
 	init_disassembler();
@@ -442,5 +466,46 @@ int PEVENT_PLUGIN_LOADER(struct pevent *pevent)
 			"kvm_mmu_prepare_zap_page", kvm_mmu_print_role,
 			NULL);
 
+	pevent_register_print_function(pevent,
+				       process_is_writable_pte,
+				       PEVENT_FUNC_ARG_INT,
+				       "is_writable_pte",
+				       PEVENT_FUNC_ARG_LONG,
+				       PEVENT_FUNC_ARG_VOID);
 	return 0;
+}
+
+void PEVENT_PLUGIN_UNLOADER(struct pevent *pevent)
+{
+	pevent_unregister_event_handler(pevent, -1, "kvm", "kvm_exit",
+					kvm_exit_handler, NULL);
+
+	pevent_unregister_event_handler(pevent, -1, "kvm", "kvm_emulate_insn",
+					kvm_emulate_insn_handler, NULL);
+
+	pevent_unregister_event_handler(pevent, -1, "kvm", "kvm_nested_vmexit",
+					kvm_nested_vmexit_handler, NULL);
+
+	pevent_unregister_event_handler(pevent, -1, "kvm", "kvm_nested_vmexit_inject",
+					kvm_nested_vmexit_inject_handler, NULL);
+
+	pevent_unregister_event_handler(pevent, -1, "kvmmmu", "kvm_mmu_get_page",
+					kvm_mmu_get_page_handler, NULL);
+
+	pevent_unregister_event_handler(pevent, -1, "kvmmmu", "kvm_mmu_sync_page",
+					kvm_mmu_print_role, NULL);
+
+	pevent_unregister_event_handler(pevent, -1,
+					"kvmmmu", "kvm_mmu_unsync_page",
+					kvm_mmu_print_role, NULL);
+
+	pevent_unregister_event_handler(pevent, -1, "kvmmmu", "kvm_mmu_zap_page",
+					kvm_mmu_print_role, NULL);
+
+	pevent_unregister_event_handler(pevent, -1, "kvmmmu",
+			"kvm_mmu_prepare_zap_page", kvm_mmu_print_role,
+			NULL);
+
+	pevent_unregister_print_function(pevent, process_is_writable_pte,
+					 "is_writable_pte");
 }

@@ -17,9 +17,22 @@ lists all plugins, events and Ftrace options to standard output.
 
 OPTIONS
 -------
-*-e*::
+*-e* ['regex']::
     This option will list the available events that are enabled on the
     local system.
+
+    It takes an optional argument that uses 'regcomp(3)' expressions to seach.
+
+    trace-cmd list -e '^sys.*'
+
+*-F*::
+    Used with *-e* 'regex' to show those events formats.
+
+*-l*::
+    Used with *-e* 'regex' to show those events filters.
+
+*-R*::
+    Used with *-e* 'regex' to show those events triggers.
 
 *-t*::
     This option will list the available tracers that are enabled on the
@@ -44,6 +57,13 @@ OPTIONS
 
 *-O*::
     List plugin options that can be used by trace-cmd report *-O* option.
+
+*-B*::
+    List defined buffer instances (sub buffers).
+
+*-C*::
+    List defined clocks that can be used with trace-cmd record -C.
+    The one in brackets ([]) is the active clock.
 
 SEE ALSO
 --------

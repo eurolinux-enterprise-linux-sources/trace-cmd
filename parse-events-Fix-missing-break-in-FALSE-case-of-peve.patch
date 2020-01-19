@@ -1,0 +1,35 @@
+From 1c47f105119646c5c95c57c176239cc1d9893d5d Mon Sep 17 00:00:00 2001
+From: Taeung Song <treeze.taeung@gmail.com>
+Date: Wed, 26 Apr 2017 23:55:40 +0900
+Subject: [PATCH] parse-events: Fix missing break in FALSE case of
+ pevent_filter_clear_trivial()
+
+Currently the FILTER_TRIVIAL_FALSE case has a missing break statement, if
+the trivial type is FALSE, it will also run into the TRUE case, and always
+be skipped as the TRUE statement will continue the loop on the inverse
+condition of the FALSE statement.
+
+Link: http://lkml.kernel.org/r/1493218540-12296-1-git-send-email-treeze.taeung@gmail.com
+
+Reported-by: Namhyung Kim <namhyung@kernel.org>
+Signed-off-by: Taeung Song <treeze.taeung@gmail.com>
+Signed-off-by: Steven Rostedt (VMware) <rostedt@goodmis.org>
+---
+ parse-filter.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/parse-filter.c b/parse-filter.c
+index 7c214ceb9386..c2fd26fd0740 100644
+--- a/parse-filter.c
++++ b/parse-filter.c
+@@ -1634,6 +1634,7 @@ int pevent_filter_clear_trivial(struct event_filter *filter,
+ 		case FILTER_TRIVIAL_FALSE:
+ 			if (filter_type->filter->boolean.value)
+ 				continue;
++			break;
+ 		case FILTER_TRIVIAL_TRUE:
+ 			if (!filter_type->filter->boolean.value)
+ 				continue;
+-- 
+2.9.5
+

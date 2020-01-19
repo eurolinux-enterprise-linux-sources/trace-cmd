@@ -1,0 +1,29 @@
+From e181db31dfac813124e59db0ebe19a7af7a9df24 Mon Sep 17 00:00:00 2001
+From: Steven Rostedt <rostedt@goodmis.org>
+Date: Mon, 1 Feb 2016 22:09:25 -0500
+Subject: [PATCH 034/134] trace-graph: Have debug resolution 16 digits
+
+Change the debug output of the resolution to 16 digits instead of the
+default of 8, as most of the time it is smaller than 8 decimal places.
+
+Signed-off-by: Steven Rostedt <rostedt@goodmis.org>
+---
+ trace-graph.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/trace-graph.c b/trace-graph.c
+index 3c981d7e61e8..9c92fc27c7f8 100644
+--- a/trace-graph.c
++++ b/trace-graph.c
+@@ -1305,7 +1305,7 @@ static int update_graph(struct graph_info *ginfo, gdouble percent)
+ 	ginfo->start_x = (ginfo->view_start_time - ginfo->start_time) *
+ 		ginfo->resolution;
+ 
+-	dprintf(1, "new resolution = %f\n", resolution);
++	dprintf(1, "new resolution = %.16f\n", resolution);
+ 	return 0;
+ }
+ 
+-- 
+2.5.5
+

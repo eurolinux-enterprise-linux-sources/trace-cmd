@@ -30,6 +30,7 @@
 #define TRACECMD_PTR2ERR(ptr)	((unisgned long)(ptr) & ~TRACECMD_ERR_MSK)
 
 void parse_cmdlines(struct pevent *pevent, char *file, int size);
+void parse_trace_clock(struct pevent *pevent, char *file, int size);
 void parse_proc_kallsyms(struct pevent *pevent, char *file, unsigned int size);
 void parse_ftrace_printk(struct pevent *pevent, char *file, unsigned int size);
 
@@ -38,7 +39,7 @@ extern int tracecmd_disable_plugins;
 
 struct plugin_list;
 struct plugin_list *tracecmd_load_plugins(struct pevent *pevent);
-void tracecmd_unload_plugins(struct plugin_list *list);
+void tracecmd_unload_plugins(struct plugin_list *list, struct pevent *pevent);
 
 char **tracecmd_event_systems(const char *tracing_dir);
 char **tracecmd_system_events(const char *tracing_dir, const char *system);
@@ -72,6 +73,10 @@ static inline int tracecmd_host_bigendian(void)
 	return *ptr == 0x01020304;
 }
 
+/* tracecmd_get_tracing_dir must *not* be freed */
+const char *tracecmd_get_tracing_dir(void);
+
+/* tracecmd_find_tracing_dir must be freed */
 char *tracecmd_find_tracing_dir(void);
 
 /* --- Opening and Reading the trace.dat file --- */
@@ -80,10 +85,16 @@ enum {
 	TRACECMD_OPTION_DONE,
 	TRACECMD_OPTION_DATE,
 	TRACECMD_OPTION_CPUSTAT,
+	TRACECMD_OPTION_BUFFER,
+	TRACECMD_OPTION_TRACECLOCK,
+	TRACECMD_OPTION_UNAME,
+	TRACECMD_OPTION_HOOK,
 };
 
 enum {
-	TRACECMD_FL_IGNORE_DATE		= 1,
+	TRACECMD_FL_IGNORE_DATE		= (1 << 0),
+	TRACECMD_FL_BUFFER_INSTANCE	= (1 << 1),
+	TRACECMD_FL_LATENCY		= (1 << 2),
 };
 
 struct tracecmd_ftrace {
@@ -106,12 +117,23 @@ int tracecmd_cpus(struct tracecmd_input *handle);
 int tracecmd_copy_headers(struct tracecmd_input *handle, int fd);
 void tracecmd_set_flag(struct tracecmd_input *handle, int flag);
 void tracecmd_clear_flag(struct tracecmd_input *handle, int flag);
+unsigned long tracecmd_get_flags(struct tracecmd_input *handle);
 
-void tracecmd_print_events(struct tracecmd_input *handle);
+int tracecmd_make_pipe(struct tracecmd_input *handle, int cpu, int fd, int cpus);
+
+int tracecmd_buffer_instances(struct tracecmd_input *handle);
+const char *tracecmd_buffer_instance_name(struct tracecmd_input *handle, int indx);
+struct tracecmd_input *tracecmd_buffer_instance_handle(struct tracecmd_input *handle, int indx);
+int tracecmd_is_buffer_instance(struct tracecmd_input *handle);
+
+void tracecmd_print_events(struct tracecmd_input *handle, const char *regex);
+
+struct hook_list *tracecmd_hooks(struct tracecmd_input *handle);
 
 int tracecmd_init_data(struct tracecmd_input *handle);
 
 void tracecmd_print_stats(struct tracecmd_input *handle);
+void tracecmd_print_uname(struct tracecmd_input *handle);
 
 struct pevent_record *
 tracecmd_read_page_record(struct pevent *pevent, void *page, int size,
@@ -163,9 +185,16 @@ tracecmd_get_cursor(struct tracecmd_input *handle, int cpu);
 
 int tracecmd_ftrace_overrides(struct tracecmd_input *handle, struct tracecmd_ftrace *finfo);
 struct pevent *tracecmd_get_pevent(struct tracecmd_input *handle);
+bool tracecmd_get_use_trace_clock(struct tracecmd_input *handle);
 
 char *tracecmd_get_tracing_file(const char *name);
 void tracecmd_put_tracing_file(char *name);
+
+int tracecmd_record_at_buffer_start(struct tracecmd_input *handle, struct pevent_record *record);
+unsigned long long tracecmd_page_ts(struct tracecmd_input *handle,
+				    struct pevent_record *record);
+unsigned int tracecmd_record_ts_delta(struct tracecmd_input *handle,
+				      struct pevent_record *record);
 
 #ifndef SWIG
 /* hack for function graph work around */
@@ -179,6 +208,8 @@ struct tracecmd_event_list {
 	struct tracecmd_event_list	*next;
 	const char			*glob;
 };
+
+struct tracecmd_option;
 
 struct tracecmd_output *tracecmd_create_file_latency(const char *output_file, int cpus);
 struct tracecmd_output *tracecmd_create_file(const char *output_file,
@@ -197,14 +228,23 @@ struct tracecmd_output *tracecmd_create_init_file(const char *output_file);
 struct tracecmd_output *tracecmd_create_init_file_override(const char *output_file,
 							   const char *tracing_dir,
 							   const char *kallsyms);
-int tracecmd_add_option(struct tracecmd_output *handle,
-			unsigned short id,
-			int size, void *data);
+struct tracecmd_option *tracecmd_add_option(struct tracecmd_output *handle,
+					    unsigned short id, int size,
+					    const void *data);
+struct tracecmd_option *tracecmd_add_buffer_option(struct tracecmd_output *handle,
+						   const char *name);
+int tracecmd_update_option(struct tracecmd_output *handle,
+			   struct tracecmd_option *option, int size,
+			   const void *data);
 void tracecmd_output_close(struct tracecmd_output *handle);
+void tracecmd_output_free(struct tracecmd_output *handle);
 struct tracecmd_output *tracecmd_copy(struct tracecmd_input *ihandle,
 				      const char *file);
 int tracecmd_append_cpu_data(struct tracecmd_output *handle,
 			     int cpus, char * const *cpu_data_files);
+int tracecmd_append_buffer_cpu_data(struct tracecmd_output *handle,
+				    struct tracecmd_option *option,
+				    int cpus, char * const *cpu_data_files);
 int tracecmd_attach_cpu_data(char *file, int cpus, char * const *cpu_data_files);
 int tracecmd_attach_cpu_data_fd(int fd, int cpus, char * const *cpu_data_files);
 
@@ -212,21 +252,28 @@ int tracecmd_attach_cpu_data_fd(int fd, int cpus, char * const *cpu_data_files);
 
 enum {
 	TRACECMD_RECORD_NOSPLICE	= (1 << 0),	/* Use read instead of splice */
+	TRACECMD_RECORD_SNAPSHOT	= (1 << 1),	/* extract from snapshot */
+	TRACECMD_RECORD_BLOCK		= (1 << 2),	/* Block on splice write */
 };
 
 void tracecmd_free_recorder(struct tracecmd_recorder *recorder);
 struct tracecmd_recorder *tracecmd_create_recorder(const char *file, int cpu, unsigned flags);
 struct tracecmd_recorder *tracecmd_create_recorder_fd(int fd, int cpu, unsigned flags);
+struct tracecmd_recorder *tracecmd_create_recorder_maxkb(const char *file, int cpu, unsigned flags, int maxkb);
+struct tracecmd_recorder *tracecmd_create_buffer_recorder_fd(int fd, int cpu, unsigned flags, const char *buffer);
+struct tracecmd_recorder *tracecmd_create_buffer_recorder(const char *file, int cpu, unsigned flags, const char *buffer);
+struct tracecmd_recorder *tracecmd_create_buffer_recorder_maxkb(const char *file, int cpu, unsigned flags, const char *buffer, int maxkb);
+
 int tracecmd_start_recording(struct tracecmd_recorder *recorder, unsigned long sleep);
 void tracecmd_stop_recording(struct tracecmd_recorder *recorder);
 void tracecmd_stat_cpu(struct trace_seq *s, int cpu);
 long tracecmd_flush_recording(struct tracecmd_recorder *recorder);
 
 /* --- Plugin handling --- */
-extern struct plugin_option trace_ftrace_options[];
+extern struct pevent_plugin_option trace_ftrace_options[];
 
-void trace_util_add_options(const char *name, struct plugin_option *options);
-void trace_util_remove_options(struct plugin_option *options);
+void trace_util_add_options(const char *name, struct pevent_plugin_option *options);
+void trace_util_remove_options(struct pevent_plugin_option *options);
 void trace_util_add_option(const char *name, const char *val);
 void trace_util_load_plugins(struct pevent *pevent, const char *suffix,
 			     void (*load_plugin)(struct pevent *pevent,
@@ -234,8 +281,8 @@ void trace_util_load_plugins(struct pevent *pevent, const char *suffix,
 						 const char *name,
 						 void *data),
 			     void *data);
-struct plugin_option *trace_util_read_plugin_options(void);
-void trace_util_free_options(struct plugin_option *options);
+struct pevent_plugin_option *trace_util_read_plugin_options(void);
+void trace_util_free_options(struct pevent_plugin_option *options);
 char **trace_util_find_plugin_files(const char *suffix);
 void trace_util_free_plugin_files(char **files);
 void trace_util_print_plugins(struct trace_seq *s, const char *prefix, const char *suffix,
@@ -248,7 +295,38 @@ const char *trace_util_plugin_option_value(const char *name);
 /* Used for trace-cmd list */
 void tracecmd_ftrace_load_options(void);
 
+/* event hooks */
+
+struct hook_list {
+	struct hook_list	*next;
+	struct buffer_instance	*instance;
+	const char		*hook;
+	char			*str;
+	char			*start_system;
+	char			*start_event;
+	char			*start_match;
+	char			*end_system;
+	char			*end_event;
+	char			*end_match;
+	char			*pid;
+	int			migrate;
+	int			global;
+	int			stack;
+};
+
+struct hook_list *tracecmd_create_event_hook(const char *arg);
+void tracecmd_free_hooks(struct hook_list *hooks);
+
 /* --- Hack! --- */
 int tracecmd_blk_hack(struct tracecmd_input *handle);
+
+
+/* --- Debugging --- */
+struct kbuffer *tracecmd_record_kbuf(struct tracecmd_input *handle,
+				     struct pevent_record *record);
+void *tracecmd_record_page(struct tracecmd_input *handle,
+			   struct pevent_record *record);
+void *tracecmd_record_offset(struct tracecmd_input *handle,
+			     struct pevent_record *record);
 
 #endif /* _TRACE_CMD_H */

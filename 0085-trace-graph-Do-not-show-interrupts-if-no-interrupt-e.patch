@@ -1,0 +1,72 @@
+From feaf0a2cccdc2977b2924fcc9ee779e80ee8c44f Mon Sep 17 00:00:00 2001
+From: "Steven Rostedt (Red Hat)" <rostedt@goodmis.org>
+Date: Mon, 3 Oct 2016 16:11:15 -0400
+Subject: [PATCH 085/134] trace-graph: Do not show 'interrupts' if no interrupt
+ event was added
+
+Since showing interrupts for when events are in interrupts can cause the
+task plots to be crazy if the interrupt events are not traced, do not do the
+"in interrupt" notation unless interrupts were traced.
+
+Signed-off-by: Steven Rostedt <rostedt@goodmis.org>
+---
+ trace-graph.c     | 6 +++++-
+ trace-graph.h     | 2 ++
+ trace-plot-task.c | 3 +++
+ 3 files changed, 10 insertions(+), 1 deletion(-)
+
+diff --git a/trace-graph.c b/trace-graph.c
+index 0eb74ff46442..bfb0525da58d 100644
+--- a/trace-graph.c
++++ b/trace-graph.c
+@@ -204,6 +204,8 @@ static void init_event_cache(struct graph_info *ginfo)
+ 	ginfo->soft_irq_entry_ids = NULL;
+ 	ginfo->soft_irq_exit_ids = NULL;
+ 
++	ginfo->no_irqs = TRUE;
++
+ 	ginfo->event_pid_field = NULL;
+ 	ginfo->event_comm_field = NULL;
+ 	ginfo->ftrace_pid_field = NULL;
+@@ -1210,8 +1212,10 @@ trace_graph_check_irq(struct graph_info *ginfo,
+ 
+ 		for (i = 0; events[i]; i++) {
+ 			event = events[i];
+-			if (strcmp(event->system, "irq_vectors") == 0)
++			if (strcmp(event->system, "irq_vectors") == 0) {
++				ginfo->no_irqs = FALSE;
+ 				break;
++			}
+ 		}
+ 
+ 		for (; events[i]; i++) {
+diff --git a/trace-graph.h b/trace-graph.h
+index bc76e50ff7b9..7e6683817e15 100644
+--- a/trace-graph.h
++++ b/trace-graph.h
+@@ -244,6 +244,8 @@ struct graph_info {
+ 	struct format_field	*wakeup_new_pid_field;
+ 	struct format_field	*wakeup_new_success_field;
+ 
++	gboolean		no_irqs;
++
+ 	gboolean		read_comms;	/* Read all comms on first load */
+ 
+ 	struct filter_task	*task_filter;
+diff --git a/trace-plot-task.c b/trace-plot-task.c
+index 5aa0af9696ce..d810ebba0291 100644
+--- a/trace-plot-task.c
++++ b/trace-plot-task.c
+@@ -338,6 +338,9 @@ static gboolean record_is_interrupt(struct graph_info *ginfo,
+ {
+ 	gboolean in_irq;
+ 
++	if (ginfo->no_irqs)
++		return FALSE;
++
+ 	in_irq = !!(pevent_data_flags(ginfo->pevent, record) &
+ 		    (TRACE_FLAG_HARDIRQ | TRACE_FLAG_SOFTIRQ));
+ 
+-- 
+2.5.5
+

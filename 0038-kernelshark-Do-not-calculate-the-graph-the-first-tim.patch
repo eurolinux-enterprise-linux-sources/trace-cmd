@@ -1,0 +1,89 @@
+From bcbd60c123e07c92032d71345dd9ec36bf4713c7 Mon Sep 17 00:00:00 2001
+From: Steven Rostedt <rostedt@goodmis.org>
+Date: Tue, 9 Feb 2016 23:00:36 -0500
+Subject: [PATCH 038/134] kernelshark: Do not calculate the graph the first
+ time
+
+It appears that showing the window widget calls the configure event for
+the graph, which does the calculation of all the events. Then in
+gtk_main() that is called again, with a slightly different width
+(perhaps the window manager changed it?). This causes the same calculations
+to happen again. When it takes 15 seconds (or more) to draw the graph
+due to millions of events, doubling the time is quite annoying.
+
+Add a flag to not draw the events the first time through. Then draw them
+from then on.
+
+Signed-off-by: Steven Rostedt <rostedt@goodmis.org>
+---
+ kernel-shark.c     | 8 ++++++++
+ trace-graph-main.c | 2 ++
+ trace-graph.c      | 3 ++-
+ trace-graph.h      | 2 ++
+ 4 files changed, 14 insertions(+), 1 deletion(-)
+
+diff --git a/kernel-shark.c b/kernel-shark.c
+index bd30d4fdcf1f..3100bf340c06 100644
+--- a/kernel-shark.c
++++ b/kernel-shark.c
+@@ -2372,8 +2372,16 @@ void kernel_shark(int argc, char **argv)
+ 	gtk_widget_set_size_request(window, TRACE_WIDTH, TRACE_HEIGHT);
+ 
+ 	gdk_threads_enter();
++
++	/*
++	 * The showing of the window will configure the graph and it will
++	 * waste time drawing the events. But after the window appears and
++	 * a border is displayed, the graph gets shown again.
++	 */
++	info->ginfo->no_draw = TRUE;
+ 	gtk_widget_show (window);
+ 
++	info->ginfo->no_draw = FALSE;
+ 	gtk_main ();
+ 	gdk_threads_leave();
+ }
+diff --git a/trace-graph-main.c b/trace-graph-main.c
+index 3654295826d0..7215d9a9a67f 100644
+--- a/trace-graph-main.c
++++ b/trace-graph-main.c
+@@ -481,7 +481,9 @@ void trace_graph(int argc, char **argv)
+ 
+ 	gtk_widget_set_size_request(window, TRACE_WIDTH, TRACE_HEIGHT);
+ 
++	ginfo->no_draw = TRUE;
+ 	gtk_widget_show (window);
++	ginfo->no_draw = FALSE;
+ 	gtk_main ();
+ }
+ 
+diff --git a/trace-graph.c b/trace-graph.c
+index d28977f51096..736800bb4ffc 100644
+--- a/trace-graph.c
++++ b/trace-graph.c
+@@ -2263,7 +2263,8 @@ configure_event(GtkWidget *widget, GdkEventMotion *event, gpointer data)
+ 
+ 	gtk_widget_set_size_request(widget, ginfo->draw_width, ginfo->draw_height);
+ 
+-	redraw_pixmap_backend(ginfo);
++	if (!ginfo->no_draw)
++		redraw_pixmap_backend(ginfo);
+ 
+ 	/* debug */
+ 	ginfo->hadj_value = gtk_adjustment_get_value(ginfo->hadj);
+diff --git a/trace-graph.h b/trace-graph.h
+index f45294f6b1b8..8ea0514e70d0 100644
+--- a/trace-graph.h
++++ b/trace-graph.h
+@@ -185,6 +185,8 @@ struct graph_info {
+ 	guint64			view_end_time;	/* visible end time */
+ 	gint			start_x;	/* virutal start of visible area */
+ 
++	gboolean		no_draw;	/* skip drawing the events */
++
+ 	guint64			cursor;		/* time of cursor (double clicked) */
+ 
+ 	gdouble			resolution;	/* pixels / time */
+-- 
+2.5.5
+

@@ -37,32 +37,82 @@
 
 struct tracecmd_recorder {
 	int		fd;
+	int		fd1;
+	int		fd2;
 	int		trace_fd;
 	int		brass[2];
 	int		page_size;
 	int		cpu;
 	int		stop;
+	int		max;
+	int		pages;
+	int		count;
+	unsigned	fd_flags;
 	unsigned	flags;
 };
+
+static int append_file(int size, int dst, int src)
+{
+	char buf[size];
+	int r;
+
+	lseek64(src, 0, SEEK_SET);
+
+	/* If there's an error, then we are pretty much screwed :-p */
+	do {
+		r = read(src, buf, size);
+		if (r < 0)
+			return r;
+		r = write(dst, buf, r);
+		if (r < 0)
+			return r;
+	} while (r);
+	return 0;
+}
 
 void tracecmd_free_recorder(struct tracecmd_recorder *recorder)
 {
 	if (!recorder)
 		return;
 
+	if (recorder->max) {
+		/* Need to put everything into fd1 */
+		if (recorder->fd == recorder->fd1) {
+			int ret;
+			/*
+			 * Crap, the older data is in fd2, and we need
+			 * to append fd1 onto it, and then copy over to fd1
+			 */
+			ret = append_file(recorder->page_size,
+					  recorder->fd2, recorder->fd1);
+			/* Error on copying, then just keep fd1 */
+			if (ret) {
+				lseek64(recorder->fd1, 0, SEEK_END);
+				goto close;
+			}
+			lseek64(recorder->fd1, 0, SEEK_SET);
+			ftruncate(recorder->fd1, 0);
+		}
+		append_file(recorder->page_size, recorder->fd1, recorder->fd2);
+	}
+ close:
 	if (recorder->trace_fd >= 0)
 		close(recorder->trace_fd);
 
-	if (recorder->fd >= 0)
-		close(recorder->fd);
+	if (recorder->fd1 >= 0)
+		close(recorder->fd1);
+
+	if (recorder->fd2 >= 0)
+		close(recorder->fd2);
 
 	free(recorder);
 }
 
-struct tracecmd_recorder *tracecmd_create_recorder_fd(int fd, int cpu, unsigned flags)
+struct tracecmd_recorder *
+tracecmd_create_buffer_recorder_fd2(int fd, int fd2, int cpu, unsigned flags,
+				    const char *buffer, int maxkb)
 {
 	struct tracecmd_recorder *recorder;
-	char *tracing = NULL;
 	char *path = NULL;
 	int ret;
 
@@ -73,31 +123,50 @@ struct tracecmd_recorder *tracecmd_create_recorder_fd(int fd, int cpu, unsigned 
 	recorder->cpu = cpu;
 	recorder->flags = flags;
 
+	recorder->fd_flags = 1; /* SPLICE_F_MOVE */
+
+	if (!(recorder->flags & TRACECMD_RECORD_BLOCK))
+		recorder->fd_flags |= 2; /* and NON_BLOCK */
+
 	/* Init to know what to free and release */
 	recorder->trace_fd = -1;
 	recorder->brass[0] = -1;
 	recorder->brass[1] = -1;
 
 	recorder->page_size = getpagesize();
+	if (maxkb) {
+		int kb_per_page = recorder->page_size >> 10;
 
+		if (!kb_per_page)
+			kb_per_page = 1;
+		recorder->max = maxkb / kb_per_page;
+		/* keep max half */
+		recorder->max >>= 1;
+		if (!recorder->max)
+			recorder->max = 1;
+	} else
+		recorder->max = 0;
+
+	recorder->count = 0;
+	recorder->pages = 0;
+
+	/* fd always points to what to write to */
 	recorder->fd = fd;
+	recorder->fd1 = fd;
+	recorder->fd2 = fd2;
 
-	tracing = tracecmd_find_tracing_dir();
-	if (!tracing) {
-		errno = ENODEV;
-		goto out_free;
-	}
-
-	path = malloc_or_die(strlen(tracing) + 40);
+	path = malloc_or_die(strlen(buffer) + 40);
 	if (!path)
 		goto out_free;
 
-	sprintf(path, "%s/per_cpu/cpu%d/trace_pipe_raw", tracing, cpu);
+	if (flags & TRACECMD_RECORD_SNAPSHOT)
+		sprintf(path, "%s/per_cpu/cpu%d/snapshot_raw", buffer, cpu);
+	else
+		sprintf(path, "%s/per_cpu/cpu%d/trace_pipe_raw", buffer, cpu);
 	recorder->trace_fd = open(path, O_RDONLY);
 	if (recorder->trace_fd < 0)
 		goto out_free;
 
-	free(tracing);
 	free(path);
 
 	if ((recorder->flags & TRACECMD_RECORD_NOSPLICE) == 0) {
@@ -109,14 +178,20 @@ struct tracecmd_recorder *tracecmd_create_recorder_fd(int fd, int cpu, unsigned 
 	return recorder;
 
  out_free:
-	free(tracing);
 	free(path);
 
 	tracecmd_free_recorder(recorder);
 	return NULL;
 }
 
-struct tracecmd_recorder *tracecmd_create_recorder(const char *file, int cpu, unsigned flags)
+struct tracecmd_recorder *
+tracecmd_create_buffer_recorder_fd(int fd, int cpu, unsigned flags, const char *buffer)
+{
+	return tracecmd_create_buffer_recorder_fd2(fd, -1, cpu, flags, buffer, 0);
+}
+
+struct tracecmd_recorder *
+tracecmd_create_buffer_recorder(const char *file, int cpu, unsigned flags, const char *buffer)
 {
 	struct tracecmd_recorder *recorder;
 	int fd;
@@ -125,13 +200,132 @@ struct tracecmd_recorder *tracecmd_create_recorder(const char *file, int cpu, un
 	if (fd < 0)
 		return NULL;
 
-	recorder = tracecmd_create_recorder_fd(fd, cpu, flags);
+	recorder = tracecmd_create_buffer_recorder_fd(fd, cpu, flags, buffer);
 	if (!recorder) {
 		close(fd);
 		unlink(file);
 	}
 
 	return recorder;
+}
+
+struct tracecmd_recorder *
+tracecmd_create_buffer_recorder_maxkb(const char *file, int cpu, unsigned flags,
+				      const char *buffer, int maxkb)
+{
+	struct tracecmd_recorder *recorder = NULL;
+	char *file2;
+	int len;
+	int fd;
+	int fd2;
+
+	if (!maxkb)
+		return tracecmd_create_buffer_recorder(file, cpu, flags, buffer);
+
+	len = strlen(file);
+	file2 = malloc(len + 3);
+	if (!file2)
+		return NULL;
+
+	sprintf(file2, "%s.1", file);
+
+	fd = open(file, O_RDWR | O_CREAT | O_TRUNC | O_LARGEFILE, 0644);
+	if (fd < 0)
+		goto out;
+
+	fd2 = open(file2, O_RDWR | O_CREAT | O_TRUNC | O_LARGEFILE, 0644);
+	if (fd < 0)
+		goto err;
+
+	recorder = tracecmd_create_buffer_recorder_fd2(fd, fd2, cpu, flags, buffer, maxkb);
+	if (!recorder)
+		goto err2;
+ out:
+	/* Unlink file2, we need to add everything to file at the end */
+	unlink(file2);
+	free(file2);
+
+	return recorder;
+ err2:
+	close(fd2);
+ err:
+	close(fd);
+	unlink(file);
+	goto out;
+}
+
+struct tracecmd_recorder *tracecmd_create_recorder_fd(int fd, int cpu, unsigned flags)
+{
+	const char *tracing;
+
+	tracing = tracecmd_get_tracing_dir();
+	if (!tracing) {
+		errno = ENODEV;
+		return NULL;
+	}
+
+	return tracecmd_create_buffer_recorder_fd(fd, cpu, flags, tracing);
+}
+
+struct tracecmd_recorder *tracecmd_create_recorder(const char *file, int cpu, unsigned flags)
+{
+	const char *tracing;
+
+	tracing = tracecmd_get_tracing_dir();
+	if (!tracing) {
+		errno = ENODEV;
+		return NULL;
+	}
+
+	return tracecmd_create_buffer_recorder(file, cpu, flags, tracing);
+}
+
+struct tracecmd_recorder *
+tracecmd_create_recorder_maxkb(const char *file, int cpu, unsigned flags, int maxkb)
+{
+	const char *tracing;
+
+	tracing = tracecmd_get_tracing_dir();
+	if (!tracing) {
+		errno = ENODEV;
+		return NULL;
+	}
+
+	return tracecmd_create_buffer_recorder_maxkb(file, cpu, flags, tracing, maxkb);
+}
+
+static inline void update_fd(struct tracecmd_recorder *recorder, int size)
+{
+	int fd;
+
+	if (!recorder->max)
+		return;
+
+	recorder->count += size;
+
+	if (recorder->count >= recorder->page_size) {
+		recorder->count = 0;
+		recorder->pages++;
+	}
+
+	if (recorder->pages < recorder->max)
+		return;
+
+	recorder->pages = 0;
+
+	fd = recorder->fd;
+
+	/* Swap fd to next file. */
+	if (fd == recorder->fd1)
+		fd = recorder->fd2;
+	else
+		fd = recorder->fd1;
+
+	/* Zero out the new file we are writing to */
+	lseek64(fd, 0, SEEK_SET);
+	ftruncate(fd, 0);
+
+	recorder->fd = fd;
 }
 
 /*
@@ -149,17 +343,21 @@ static long splice_data(struct tracecmd_recorder *recorder)
 			warning("recorder error in splice input");
 			return -1;
 		}
-	}
+		if (errno == EINTR)
+			return 0;
+	} else if (ret == 0)
+		return 0;
 
 	ret = splice(recorder->brass[0], NULL, recorder->fd, NULL,
-		     recorder->page_size, 3 /* and NON_BLOCK */);
+		     recorder->page_size, recorder->fd_flags);
 	if (ret < 0) {
 		if (errno != EAGAIN && errno != EINTR) {
 			warning("recorder error in splice output");
 			return -1;
 		}
 		ret = 0;
-	}
+	} else
+		update_fd(recorder, ret);
 
 	return ret;
 }
@@ -181,8 +379,10 @@ static long read_data(struct tracecmd_recorder *recorder)
 		}
 		ret = 0;
 	}
-	if (ret > 0)
+	if (ret > 0) {
 		write(recorder->fd, buf, ret);
+		update_fd(recorder, ret);
+	}
 
 	return ret;
 }
@@ -194,12 +394,16 @@ static void set_nonblock(struct tracecmd_recorder *recorder)
 	/* Do not block on reads for flushing */
 	flags = fcntl(recorder->trace_fd, F_GETFL);
 	fcntl(recorder->trace_fd, F_SETFL, flags | O_NONBLOCK);
+
+	/* Do not block on streams for write */
+	recorder->fd_flags |= 2; /* NON_BLOCK */
 }
 
 long tracecmd_flush_recording(struct tracecmd_recorder *recorder)
 {
-	char *buf[recorder->page_size];
+	char buf[recorder->page_size];
 	long total = 0;
+	long wrote = 0;
 	long ret;
 
 	set_nonblock(recorder);
@@ -217,9 +421,20 @@ long tracecmd_flush_recording(struct tracecmd_recorder *recorder)
 	/* splice only reads full pages */
 	do {
 		ret = read(recorder->trace_fd, buf, recorder->page_size);
-		if (ret > 0)
+		if (ret > 0) {
 			write(recorder->fd, buf, ret);
+			wrote += ret;
+		}
+
 	} while (ret > 0);
+
+	/* Make sure we finish off with a page size boundary */
+	wrote &= recorder->page_size - 1;
+	if (wrote) {
+		memset(buf, 0, recorder->page_size);
+		write(recorder->fd, buf, recorder->page_size - wrote);
+		total += recorder->page_size;
+	}
 
 	return total;
 }
@@ -268,43 +483,4 @@ void tracecmd_stop_recording(struct tracecmd_recorder *recorder)
 	set_nonblock(recorder);
 
 	recorder->stop = 1;
-}
-
-/**
- * tracecmd_stat_cpu - show the buffer stats of a particular CPU
- * @s: the trace_seq to record the data in.
- * @cpu: the CPU to stat
- *
- */
-void tracecmd_stat_cpu(struct trace_seq *s, int cpu)
-{
-	char buf[BUFSIZ];
-	char *tracing;
-	char *path;
-	int fd;
-	int r;
-
-	tracing = tracecmd_find_tracing_dir();
-	if (!tracing) {
-		errno = ENODEV;
-		goto out_free;
-	}
-
-	path = malloc_or_die(strlen(tracing) + 40);
-	if (!path)
-		goto out_free;
-
-	sprintf(path, "%s/per_cpu/cpu%d/stats", tracing, cpu);
-	fd = open(path, O_RDONLY);
-	if (fd < 0)
-		goto out_free;
-
-	while ((r = read(fd, buf, BUFSIZ)) > 0)
-		trace_seq_printf(s, "%.*s", r, buf);
-
-	close(fd);
-
- out_free:
-	free(path);
-	free(tracing);
 }

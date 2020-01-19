@@ -1,0 +1,39 @@
+From 3d099b4fc751b3f62d77bcd902c1defac8c3889f Mon Sep 17 00:00:00 2001
+From: "Steven Rostedt (Red Hat)" <rostedt@goodmis.org>
+Date: Mon, 21 Sep 2015 16:11:28 -0400
+Subject: [PATCH 013/134] trace-cmd: Remove malloc_or_die() from
+ trace-recorder.c
+
+The two places tha used malloc_or_die() already checked the return of the
+call and failed appropriately if it did not succeed. No need to die.
+
+Signed-off-by: Steven Rostedt <rostedt@goodmis.org>
+---
+ trace-recorder.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/trace-recorder.c b/trace-recorder.c
+index 66cad986c44b..7e637d36a889 100644
+--- a/trace-recorder.c
++++ b/trace-recorder.c
+@@ -116,7 +116,7 @@ tracecmd_create_buffer_recorder_fd2(int fd, int fd2, int cpu, unsigned flags,
+ 	char *path = NULL;
+ 	int ret;
+ 
+-	recorder = malloc_or_die(sizeof(*recorder));
++	recorder = malloc(sizeof(*recorder));
+ 	if (!recorder)
+ 		return NULL;
+ 
+@@ -155,7 +155,7 @@ tracecmd_create_buffer_recorder_fd2(int fd, int fd2, int cpu, unsigned flags,
+ 	recorder->fd1 = fd;
+ 	recorder->fd2 = fd2;
+ 
+-	path = malloc_or_die(strlen(buffer) + 40);
++	path = malloc(strlen(buffer) + 40);
+ 	if (!path)
+ 		goto out_free;
+ 
+-- 
+2.5.5
+

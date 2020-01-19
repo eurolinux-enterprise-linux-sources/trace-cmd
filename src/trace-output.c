@@ -36,7 +36,12 @@
 #include <glob.h>
 
 #include "trace-cmd-local.h"
+#include "list.h"
 #include "version.h"
+
+/* We can't depend on the host size for size_t, all must be 64 bit */
+typedef unsigned long long	tsize_t;
+typedef long long		stsize_t;
 
 static struct tracecmd_event_list all_event_list = {
 	.next = NULL,
@@ -47,6 +52,8 @@ struct tracecmd_option {
 	unsigned short	id;
 	int		size;
 	void		*data;
+	tsize_t		offset;
+	struct list_head list;
 };
 
 struct tracecmd_output {
@@ -57,7 +64,7 @@ struct tracecmd_output {
 	char		*tracing_dir;
 	int		options_written;
 	int		nr_options;
-	struct tracecmd_option *options;
+	struct list_head options;
 };
 
 struct list_event {
@@ -72,12 +79,8 @@ struct list_event_system {
 	char				*name;
 };
 
-/* We can't depend on the host size for size_t, all must be 64 bit */
-typedef unsigned long long	tsize_t;
-typedef long long		stsize_t;
-
 static stsize_t
-do_write_check(struct tracecmd_output *handle, void *data, tsize_t size)
+do_write_check(struct tracecmd_output *handle, const void *data, tsize_t size)
 {
 	return __do_write_check(handle->fd, data, size);
 }
@@ -107,10 +110,32 @@ static unsigned long long convert_endian_8(struct tracecmd_output *handle,
 	return __data2host8(handle->pevent, val);
 }
 
+void tracecmd_output_free(struct tracecmd_output *handle)
+{
+	struct tracecmd_option *option;
+
+	if (!handle)
+		return;
+
+	if (handle->tracing_dir)
+		free(handle->tracing_dir);
+
+	if (handle->pevent)
+		pevent_unref(handle->pevent);
+
+	while (!list_empty(&handle->options)) {
+		option = container_of(handle->options.next,
+				      struct tracecmd_option, list);
+		list_del(&option->list);
+		free(option->data);
+		free(option);
+	}
+
+	free(handle);
+}
+
 void tracecmd_output_close(struct tracecmd_output *handle)
 {
-	int i;
-
 	if (!handle)
 		return;
 
@@ -119,21 +144,8 @@ void tracecmd_output_close(struct tracecmd_output *handle)
 		handle->fd = -1;
 	}
 
-	if (handle->tracing_dir)
-		free(handle->tracing_dir);
-
-	if (handle->pevent)
-		pevent_unref(handle->pevent);
-
-	if (handle->options) {
-		for (i = 0; i < handle->nr_options; i++)
-			free(handle->options[i].data);
-		free(handle->options);
-	}
-
-	free(handle);
+	tracecmd_output_free(handle);
 }
-
 static unsigned long get_size_fd(int fd)
 {
 	unsigned long long size = 0;
@@ -686,6 +698,45 @@ static int read_ftrace_printk(struct tracecmd_output *handle)
 	return -1;
 }
 
+static int save_tracing_file_data(struct tracecmd_output *handle,
+						const char *filename)
+{
+	unsigned long long endian8;
+	char *file = NULL;
+	struct stat st;
+	off64_t check_size;
+	off64_t size;
+	int ret = -1;
+
+	file = get_tracing_file(handle, filename);
+	if (!file)
+		return -1;
+
+	ret = stat(file, &st);
+	if (ret >= 0) {
+		size = get_size(file);
+		endian8 = convert_endian_8(handle, size);
+		if (do_write_check(handle, &endian8, 8))
+			goto out_free;
+		check_size = copy_file(handle, file);
+		if (size != check_size) {
+			errno = EINVAL;
+			warning("error in size of file '%s'", file);
+			goto out_free;
+		}
+	} else {
+		size = 0;
+		endian8 = convert_endian_8(handle, size);
+		if (do_write_check(handle, &endian8, 8))
+			goto out_free;
+	}
+	ret = 0;
+
+out_free:
+	put_tracing_file(file);
+	return ret;
+}
+
 static struct tracecmd_output *
 create_file_fd(int fd, struct tracecmd_input *ihandle,
 	       const char *tracing_dir,
@@ -693,15 +744,9 @@ create_file_fd(int fd, struct tracecmd_input *ihandle,
 	       struct tracecmd_event_list *list)
 {
 	struct tracecmd_output *handle;
-	unsigned long long endian8;
 	struct pevent *pevent;
 	char buf[BUFSIZ];
-	char *file = NULL;
-	struct stat st;
-	off64_t check_size;
-	off64_t size;
 	int endian4;
-	int ret;
 
 	handle = malloc(sizeof(*handle));
 	if (!handle)
@@ -714,6 +759,8 @@ create_file_fd(int fd, struct tracecmd_input *ihandle,
 		if (!handle->tracing_dir)
 			goto out_free;
 	}
+
+	list_head_init(&handle->options);
 
 	buf[0] = 23;
 	buf[1] = 8;
@@ -774,27 +821,8 @@ create_file_fd(int fd, struct tracecmd_input *ihandle,
 	/*
 	 * Save the command lines;
 	 */
-	file = get_tracing_file(handle, "saved_cmdlines");
-	ret = stat(file, &st);
-	if (ret >= 0) {
-		size = get_size(file);
-		endian8 = convert_endian_8(handle, size);
-		if (do_write_check(handle, &endian8, 8))
-			goto out_free;
-		check_size = copy_file(handle, file);
-		if (size != check_size) {
-			errno = EINVAL;
-			warning("error in size of file '%s'", file);
-			goto out_free;
-		}
-	} else {
-		size = 0;
-		endian8 = convert_endian_8(handle, size);
-		if (do_write_check(handle, &endian8, 8))
-			goto out_free;
-	}
-	put_tracing_file(file);
-	file = NULL;
+	if (save_tracing_file_data(handle, "saved_cmdlines") < 0)
+		goto out_free;
 
 	return handle;
 
@@ -831,63 +859,67 @@ static struct tracecmd_output *create_file(const char *output_file,
  * @id: the id of the option
  * @size: the size of the option data
  * @data: the data to write to the file.
+ *
+ * Returns handle to update option if needed.
+ *  Just the content can be updated, with smaller or equal to
+ *  content than the specified size.
  */
-int tracecmd_add_option(struct tracecmd_output *handle,
-			unsigned short id,
-			int size, void *data)
+struct tracecmd_option *
+tracecmd_add_option(struct tracecmd_output *handle,
+		    unsigned short id, int size, const void *data)
 {
-	int index = handle->nr_options;
+	struct tracecmd_option *option;
 
 	/*
 	 * We can only add options before they were written.
 	 * This may change in the future.
 	 */
 	if (handle->options_written)
-		return -EBUSY;
+		return NULL;
 
 	handle->nr_options++;
 
-	if (!handle->options)
-		handle->options = malloc_or_die(sizeof(*handle->options));
-	else {
-		handle->options = realloc(handle->options,
-					  sizeof(*handle->options) * handle->nr_options);
-		if (!handle->options)
-			die("Could not reallocate space for options");
-	}
+	option = malloc(sizeof(*option));
+	if (!option)
+		die("Could not allocate space for option");
 
-	handle->options[index].id = id;
-	handle->options[index].size = size;
-	handle->options[index].data = malloc_or_die(size);
-	memcpy(handle->options[index].data, data, size);
+	option->id = id;
+	option->size = size;
+	option->data = malloc_or_die(size);
+	memcpy(option->data, data, size);
+	list_add_tail(&option->list, &handle->options);
 
-	return 0;
+	return option;
 }
 
 static int add_options(struct tracecmd_output *handle)
 {
+	struct tracecmd_option *options;
 	unsigned short option;
 	unsigned short endian2;
 	unsigned int endian4;
-	int i;
 
+	/* If already written, ignore */
 	if (handle->options_written)
-		die("options already written?");
+		return 0;
 
 	if (do_write_check(handle, "options  ", 10))
 		return -1;
 
-	for (i = 0; i < handle->nr_options; i++) {
-		endian2 = convert_endian_2(handle, handle->options[i].id);
+	list_for_each_entry(options, &handle->options, list) {
+		endian2 = convert_endian_2(handle, options->id);
 		if (do_write_check(handle, &endian2, 2))
 			return -1;
 
-		endian4 = convert_endian_4(handle, handle->options[i].size);
+		endian4 = convert_endian_4(handle, options->size);
 		if (do_write_check(handle, &endian4, 4))
 			return -1;
 
-		if (do_write_check(handle, handle->options[i].data,
-				   handle->options[i].size))
+		/* Save the data location in case it needs to be updated */
+		options->offset = lseek64(handle->fd, 0, SEEK_CUR);
+
+		if (do_write_check(handle, options->data,
+				   options->size))
 			return -1;
 	}
 
@@ -899,6 +931,67 @@ static int add_options(struct tracecmd_output *handle)
 	handle->options_written = 1;
 
 	return 0;
+}
+
+int tracecmd_update_option(struct tracecmd_output *handle,
+			   struct tracecmd_option *option, int size,
+			   const void *data)
+{
+	tsize_t offset;
+	stsize_t ret;
+
+	if (size > option->size) {
+		warning("Can't update option with more data than allocated");
+		return -1;
+	}
+
+	if (!handle->options_written) {
+		/* Hasn't been written yet. Just update current pointer */
+		option->size = size;
+		memcpy(option->data, data, size);
+		return 0;
+	}
+
+	/* Save current offset */
+	offset = lseek64(handle->fd, 0, SEEK_CUR);
+
+	ret = lseek64(handle->fd, option->offset, SEEK_SET);
+	if (ret == (off64_t)-1) {
+		warning("could not seek to %lld\n", option->offset);
+		return -1;
+	}
+
+	if (do_write_check(handle, data, size))
+		return -1;
+
+	ret = lseek64(handle->fd, offset, SEEK_SET);
+	if (ret == (off64_t)-1) {
+		warning("could not seek to %lld\n", offset);
+		return -1;
+	}
+
+	return 0;
+}
+
+struct tracecmd_option *
+tracecmd_add_buffer_option(struct tracecmd_output *handle, const char *name)
+{
+	struct tracecmd_option *option;
+	char *buf;
+	int size = 8 + strlen(name) + 1;
+
+	buf = malloc(size);
+	if (!buf) {
+		warning("Failed to malloc buffer");
+		return NULL;
+	}
+	*(tsize_t *)buf = 0;
+	strcpy(buf + 8, name);
+
+	option = tracecmd_add_option(handle, TRACECMD_OPTION_BUFFER, size, buf);
+	free(buf);
+
+	return option;
 }
 
 struct tracecmd_output *tracecmd_create_file_latency(const char *output_file, int cpus)
@@ -935,8 +1028,8 @@ out_free:
 	return NULL;
 }
 
-int tracecmd_append_cpu_data(struct tracecmd_output *handle,
-			     int cpus, char * const *cpu_data_files)
+static int __tracecmd_append_cpu_data(struct tracecmd_output *handle,
+				      int cpus, char * const *cpu_data_files)
 {
 	off64_t *offsets = NULL;
 	unsigned long long *sizes = NULL;
@@ -945,16 +1038,8 @@ int tracecmd_append_cpu_data(struct tracecmd_output *handle,
 	off64_t check_size;
 	char *file;
 	struct stat st;
-	int endian4;
 	int ret;
 	int i;
-
-	endian4 = convert_endian_4(handle, cpus);
-	if (do_write_check(handle, &endian4, 4))
-		goto out_free;
-
-	if (add_options(handle) < 0)
-		goto out_free;
 
 	if (do_write_check(handle, "flyrecord", 10))
 		goto out_free;
@@ -970,6 +1055,28 @@ int tracecmd_append_cpu_data(struct tracecmd_output *handle,
 
 	/* hold any extra data for data */
 	offset += cpus * (16);
+
+	/*
+	 * Unfortunately, the trace_clock data was placed after the
+	 * cpu data, and wasn't accounted for with the offsets.
+	 * We need to save room for the trace_clock file. This means
+	 * we need to find the size of it before we define the final
+	 * offsets.
+	 */
+	file = get_tracing_file(handle, "trace_clock");
+	if (!file)
+		goto out_free;
+
+	/* Save room for storing the size */
+	offset += 8;
+
+	ret = stat(file, &st);
+	if (ret >= 0)
+		offset += get_size(file);
+
+	put_tracing_file(file);
+
+	/* Page align offset */
 	offset = (offset + (handle->page_size - 1)) & ~(handle->page_size - 1);
 
 	for (i = 0; i < cpus; i++) {
@@ -991,6 +1098,9 @@ int tracecmd_append_cpu_data(struct tracecmd_output *handle,
 		if (do_write_check(handle, &endian8, 8))
 			goto out_free;
 	}
+
+	if (save_tracing_file_data(handle, "trace_clock") < 0)
+		goto out_free;
 
 	for (i = 0; i < cpus; i++) {
 		fprintf(stderr, "CPU%d data recorded at offset=0x%llx\n",
@@ -1019,6 +1129,50 @@ int tracecmd_append_cpu_data(struct tracecmd_output *handle,
 	free(offsets);
 	free(sizes);
 	return -1;
+}
+
+int tracecmd_append_cpu_data(struct tracecmd_output *handle,
+			     int cpus, char * const *cpu_data_files)
+{
+	int endian4;
+
+	endian4 = convert_endian_4(handle, cpus);
+	if (do_write_check(handle, &endian4, 4))
+		return -1;
+
+	if (add_options(handle) < 0)
+		return -1;
+
+	return __tracecmd_append_cpu_data(handle, cpus, cpu_data_files);
+}
+
+int tracecmd_append_buffer_cpu_data(struct tracecmd_output *handle,
+				    struct tracecmd_option *option,
+				    int cpus, char * const *cpu_data_files)
+{
+	tsize_t offset;
+	stsize_t ret;
+
+	offset = lseek64(handle->fd, 0, SEEK_CUR);
+
+	/* Go to the option data, where will write the offest */
+	ret = lseek64(handle->fd, option->offset, SEEK_SET);
+	if (ret == (off64_t)-1) {
+		warning("could not seek to %lld\n", option->offset);
+		return -1;
+	}
+
+	if (do_write_check(handle, &offset, 8))
+		return -1;
+
+	/* Go back to end of file */
+	ret = lseek64(handle->fd, offset, SEEK_SET);
+	if (ret == (off64_t)-1) {
+		warning("could not seek to %lld\n", offset);
+		return -1;
+	}
+
+	return __tracecmd_append_cpu_data(handle, cpus, cpu_data_files);
 }
 
 int tracecmd_attach_cpu_data_fd(int fd, int cpus, char * const *cpu_data_files)
@@ -1056,6 +1210,7 @@ int tracecmd_attach_cpu_data_fd(int fd, int cpus, char * const *cpu_data_files)
 	handle->pevent = tracecmd_get_pevent(ihandle);
 	pevent_ref(pevent);
 	handle->page_size = tracecmd_page_size(ihandle);
+	list_head_init(&handle->options);
 
 	if (tracecmd_append_cpu_data(handle, cpus, cpu_data_files) >= 0)
 		ret = 0;

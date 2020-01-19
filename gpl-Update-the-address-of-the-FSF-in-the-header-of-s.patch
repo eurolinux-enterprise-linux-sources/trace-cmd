@@ -7,9 +7,8 @@ Subject: [PATCH 5/7] gpl: Update the address of the FSF in the header of
 ---
  plugin_blk.c     | 3 ++-
  trace-blk-hack.c | 3 ++-
- trace-options.c  | 3 ++-
  trace-recorder.c | 3 ++-
- 4 files changed, 8 insertions(+), 4 deletions(-)
+ 3 files changed, 6 insertions(+), 3 deletions(-)
 
 diff --git a/plugin_blk.c b/plugin_blk.c
 index e87bebbc0b9d..773f51b62e66 100644
@@ -34,20 +33,6 @@ index b1b181b254a3..1c8399d94612 100644
   * You should have received a copy of the GNU Lesser General Public
   * License along with this program; if not,  see <http://www.gnu.org/licenses>
 - * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
-+ * Foundation, Inc.,
-+ * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
-  *
-  * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-  */
-diff --git a/trace-options.c b/trace-options.c
-index aba9b738cdf9..beaa9d0fbbd3 100644
---- a/trace-options.c
-+++ b/trace-options.c
-@@ -14,7 +14,8 @@
-  *
-  * You should have received a copy of the GNU General Public License
-  * along with this program; if not,  see <http://www.gnu.org/licenses>
-- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 + * Foundation, Inc.,
 + * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
   *

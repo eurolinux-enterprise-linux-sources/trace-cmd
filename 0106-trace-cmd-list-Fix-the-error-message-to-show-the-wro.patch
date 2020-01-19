@@ -1,0 +1,29 @@
+From 8cfd82f1c16287f56f4a57306d2c709c5df1b099 Mon Sep 17 00:00:00 2001
+From: "Steven Rostedt (Red Hat)" <rostedt@goodmis.org>
+Date: Thu, 22 Sep 2016 17:33:46 -0400
+Subject: [PATCH 106/134] trace-cmd list: Fix the error message to show the
+ wrong option
+
+The index uesd optind instead of 'i' returning some random char.
+
+Signed-off-by: Steven Rostedt <rostedt@goodmis.org>
+---
+ trace-cmd.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/trace-cmd.c b/trace-cmd.c
+index e16338e34bbe..758671eb8679 100644
+--- a/trace-cmd.c
++++ b/trace-cmd.c
+@@ -715,7 +715,7 @@ int main (int argc, char **argv)
+ 						argv[i]);
+ 				default:
+ 					fprintf(stderr, "list: invalid option -- '%c'\n",
+-						argv[optind][1]);
++						argv[i][1]);
+ 					usage(argv);
+ 				}
+ 			}
+-- 
+2.5.5
+

@@ -1,0 +1,45 @@
+From 4c87d638c69eb258cd7ce2d87a86af0c2b6a8122 Mon Sep 17 00:00:00 2001
+From: "Steven Rostedt (Red Hat)" <rostedt@goodmis.org>
+Date: Thu, 17 Sep 2015 14:07:58 -0400
+Subject: [PATCH 002/134] event-parse: Use USECS_PER_SEC instead of hardcoded
+ number
+
+Instead of using 1000000, define a USECS_PER_SEC macro and use that instead.
+
+Signed-off-by: Steven Rostedt <rostedt@goodmis.org>
+---
+ event-parse.c | 4 ++--
+ event-parse.h | 2 ++
+ 2 files changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/event-parse.c b/event-parse.c
+index 923d2155226b..9b44125eca46 100644
+--- a/event-parse.c
++++ b/event-parse.c
+@@ -5242,8 +5242,8 @@ void pevent_print_event(struct pevent *pevent, struct trace_seq *s,
+ 		} else {
+ 			usecs = (nsecs + 500) / NSECS_PER_USEC;
+ 			/* To avoid usecs larger than 1 sec */
+-			if (usecs >= 1000000) {
+-				usecs -= 1000000;
++			if (usecs >= USECS_PER_SEC) {
++				usecs -= USECS_PER_SEC;
+ 				secs--;
+ 			}
+ 			p = 6;
+diff --git a/event-parse.h b/event-parse.h
+index c650f0b5847f..1705425ded68 100644
+--- a/event-parse.h
++++ b/event-parse.h
+@@ -175,6 +175,8 @@ struct pevent_plugin_option {
+ #define NSECS_PER_SEC		1000000000ULL
+ #define NSECS_PER_USEC		1000ULL
+ 
++#define USECS_PER_SEC		1000000ULL
++
+ enum format_flags {
+ 	FIELD_IS_ARRAY		= 1,
+ 	FIELD_IS_POINTER	= 2,
+-- 
+2.5.5
+

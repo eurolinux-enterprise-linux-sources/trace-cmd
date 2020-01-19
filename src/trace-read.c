@@ -36,12 +36,13 @@
 #include <errno.h>
 
 #include "trace-local.h"
-#include "trace-hash-local.h"
+#include "trace-hash.h"
+#include "kbuffer.h"
 #include "list.h"
 
 static struct filter_str {
 	struct filter_str	*next;
-	const char		*filter;
+	char			*filter;
 	int			neg;
 } *filter_strings;
 static struct filter_str **filter_next = &filter_strings;
@@ -80,12 +81,16 @@ struct pid_list {
 	int			free;
 } *pid_list;
 
+struct pid_list *comm_list;
+
 static unsigned int page_size;
 static int input_fd;
 static const char *default_input_file = "trace.dat";
 static const char *input_file;
 static int multi_inputs;
 static int max_file_size;
+
+static int instances;
 
 static int *filter_cpus;
 static int nr_filter_cpus;
@@ -94,24 +99,37 @@ static int show_wakeup;
 static int wakeup_id;
 static int wakeup_new_id;
 static int sched_id;
+static int stacktrace_id;
+
+static int profile;
+
+static int buffer_breaks = 0;
+static int debug = 0;
 
 static struct format_field *wakeup_task;
 static struct format_field *wakeup_success;
 static struct format_field *wakeup_new_task;
 static struct format_field *wakeup_new_success;
 static struct format_field *sched_task;
+static struct format_field *sched_prio;
 
 static unsigned long long total_wakeup_lat;
 static unsigned long wakeup_lat_count;
 
+static unsigned long long total_wakeup_rt_lat;
+static unsigned long wakeup_rt_lat_count;
+
 struct wakeup_info {
-	struct wakeup_info	*next;
+	struct trace_hash_item	hash;
 	unsigned long long	start;
 	int			pid;
 };
 
+static struct hook_list *hooks;
+static struct hook_list *last_hook;
+
 #define WAKEUP_HASH_SIZE 1024
-static struct wakeup_info *wakeup_hash[WAKEUP_HASH_SIZE];
+static struct trace_hash wakeup_hash;
 
 /* Debug variables for testing tracecmd_read_at */
 #define TEST_READ_AT 0
@@ -278,14 +296,15 @@ static void add_handle(struct tracecmd_input *handle, const char *file)
 	item = malloc_or_die(sizeof(*item));
 	memset(item, 0, sizeof(*item));
 	item->handle = handle;
-	item->file = file + strlen(file);
-	/* we want just the base name */
-	while (*item->file != '/' && item->file >= file)
-		item->file--;
-	item->file++;
-	if (strlen(item->file) > max_file_size)
-		max_file_size = strlen(item->file);
-
+	if (file) {
+		item->file = file + strlen(file);
+		/* we want just the base name */
+		while (item->file >= file && *item->file != '/')
+			item->file--;
+		item->file++;
+		if (strlen(item->file) > max_file_size)
+			max_file_size = strlen(item->file);
+	}
 	list_add_tail(&item->list, &handle_list);
 }
 
@@ -316,7 +335,9 @@ static void add_filter(const char *filter, int neg)
 	struct filter_str *ftr;
 
 	ftr = malloc_or_die(sizeof(*ftr));
-	ftr->filter = filter;
+	ftr->filter = strdup(filter);
+	if (!ftr->filter)
+		die("malloc");
 	ftr->next = NULL;
 	ftr->neg = neg;
 
@@ -325,7 +346,7 @@ static void add_filter(const char *filter, int neg)
 	filter_next = &ftr->next;
 }
 
-static void add_pid_filter(const char *arg)
+static void __add_filter(struct pid_list **head, const char *arg)
 {
 	struct pid_list *list;
 	char *pids = strdup(arg);
@@ -341,62 +362,109 @@ static void add_pid_filter(const char *arg)
 		list = malloc_or_die(sizeof(*list));
 		list->pid = pid;
 		list->free = free;
-		list->next = pid_list;
-		pid_list = list;
+		list->next = *head;
+		*head = list;
 		/* The first pid needs to be freed */
 		free = 0;
 		pid = strtok_r(NULL, ",", &sav);
 	}
 }
 
-static char *append_pid_filter(char *curr_filter, const char *events,
-			       const char *field, char *pid)
+static void add_comm_filter(const char *arg)
+{
+	__add_filter(&comm_list, arg);
+}
+
+static void add_pid_filter(const char *arg)
+{
+	__add_filter(&pid_list, arg);
+}
+
+static char *append_pid_filter(char *curr_filter, char *pid)
 {
 	char *filter;
 	int len;
 
-	len = strlen("(!=)&&") + strlen(field) + strlen(pid);
-	if (!curr_filter) {
-		/* No need for +1 as we don't use the "||" */
-		filter = malloc_or_die(len);
-		sprintf(filter, "%s:(%s==%s)", events, field, pid);
-	} else {
-		int indx = strlen(curr_filter);
+#define FILTER_FMT "(common_pid==" __STR ")||(pid==" __STR ")||(next_pid==" __STR ")"
 
-		len += indx;
-		filter = realloc(curr_filter, len + indx + 1);
+#undef __STR
+#define __STR ""
+
+	/* strlen(".*:") > strlen("||") */
+	len = strlen(".*:" FILTER_FMT) + strlen(pid) * 3 + 1;
+
+#undef __STR
+#define __STR "%s"
+
+	if (!curr_filter) {
+		filter = malloc_or_die(len);
+		sprintf(filter, ".*:" FILTER_FMT, pid, pid, pid);
+	} else {
+
+		len += strlen(curr_filter);
+
+		filter = realloc(curr_filter, len);
 		if (!filter)
 			die("realloc");
-		sprintf(filter, "%s||(%s==%s)", curr_filter, field, pid);
+		sprintf(filter, "%s||" FILTER_FMT, filter, pid, pid, pid);
 	}
 
 	return filter;
 }
 
-static void make_pid_filter(void)
+static void convert_comm_filter(struct tracecmd_input *handle)
+{
+	struct pevent *pevent;
+	struct pid_list *list;
+	struct cmdline *cmdline;
+	char pidstr[100];
+
+	if (!comm_list)
+		return;
+
+	pevent = tracecmd_get_pevent(handle);
+
+	/* Seach for comm names and get their pids */
+	for (list = comm_list; list; list = list->next) {
+		cmdline = pevent_data_pid_from_comm(pevent, list->pid, NULL);
+		if (!cmdline) {
+			warning("comm: %s not in cmdline list", list->pid);
+			continue;
+		}
+		do {
+			sprintf(pidstr, "%d", pevent_cmdline_pid(pevent, cmdline));
+			add_pid_filter(pidstr);
+			cmdline = pevent_data_pid_from_comm(pevent, list->pid,
+							    cmdline);
+		} while (cmdline);
+	}
+
+	while (comm_list) {
+		list = comm_list;
+		comm_list = comm_list->next;
+		if (list->free)
+			free(list->pid);
+		free(list);
+	}
+}
+
+static void make_pid_filter(struct tracecmd_input *handle)
 {
 	struct pid_list *list;
-	char *common_str = NULL;
-	char *sched_switch_str = NULL;
-	char *sched_wakeup_str = NULL;
+	char *str = NULL;
+
+	convert_comm_filter(handle);
 
 	if (!pid_list)
 		return;
 
 	/* First do all common pids */
 	for (list = pid_list; list; list = list->next) {
-		common_str = append_pid_filter(common_str, ".*",
-					       "common_pid", list->pid);
-		sched_switch_str = append_pid_filter(sched_switch_str, "sched_switch",
-						     "next_pid", list->pid);
-		sched_wakeup_str = append_pid_filter(sched_wakeup_str, "sched_wakeup.*",
-						     "pid", list->pid);
+		str = append_pid_filter(str, list->pid);
 	}
 
-	/* Add it as a negative filters */
-	add_filter(common_str, 1);
-	add_filter(sched_switch_str, 1);
-	add_filter(sched_wakeup_str, 1);
+	add_filter(str, 0);
+	free(str);
 
 	while (pid_list) {
 		list = pid_list;
@@ -414,12 +482,12 @@ static void process_filters(struct handle_list *handles)
 	struct filter *event_filter;
 	struct filter_str *filter;
 	struct pevent *pevent;
-	char *errstr;
+	char errstr[200];
 	int ret;
 
 	pevent = tracecmd_get_pevent(handles->handle);
 
-	make_pid_filter();
+	make_pid_filter(handles->handle);
 
 	while (filter_strings) {
 		filter = filter_strings;
@@ -432,14 +500,12 @@ static void process_filters(struct handle_list *handles)
 			die("malloc");
 
 		ret = pevent_filter_add_filter_str(event_filter->filter,
-						   filter->filter,
-						   &errstr);
-		if (ret < 0)
+						   filter->filter);
+		if (ret < 0) {
+			pevent_strerror(pevent, ret, errstr, sizeof(errstr));
 			die("Error filtering: %s\n%s",
 			    filter->filter, errstr);
-
-		free(errstr);
-		free(filter);
+		}
 
 		if (filter->neg) {
 			*filter_out_next = event_filter;
@@ -448,13 +514,10 @@ static void process_filters(struct handle_list *handles)
 			*filter_next = event_filter;
 			filter_next = &event_filter->next;
 		}
-	}
-}
 
-static int filter_record(struct tracecmd_input *handle,
-			 struct pevent_record *record)
-{
-	return 0;
+		free(filter->filter);
+		free(filter);
+	}
 }
 
 static void init_wakeup(struct tracecmd_input *handle)
@@ -466,6 +529,8 @@ static void init_wakeup(struct tracecmd_input *handle)
 		return;
 
 	pevent = tracecmd_get_pevent(handle);
+
+	trace_hash_init(&wakeup_hash, WAKEUP_HASH_SIZE);
 
 	event = pevent_find_event_by_name(pevent, "sched", "sched_wakeup");
 	if (!event)
@@ -482,6 +547,10 @@ static void init_wakeup(struct tracecmd_input *handle)
 	sched_id = event->id;
 	sched_task = pevent_find_field(event, "next_pid");
 	if (!sched_task)
+		goto fail;
+
+	sched_prio = pevent_find_field(event, "next_prio");
+	if (!sched_prio)
 		goto fail;
 
 
@@ -503,42 +572,24 @@ static void init_wakeup(struct tracecmd_input *handle)
 	show_wakeup = 0;
 }
 
-static unsigned int calc_wakeup_key(unsigned long val)
-{
-	return trace_hash(val) % WAKEUP_HASH_SIZE;
-}
-
-static struct wakeup_info *
-__find_wakeup(unsigned int key, unsigned int val)
-{
-	struct wakeup_info *info = wakeup_hash[key];
-
-	while (info) {
-		if (info->pid == val)
-			return info;
-		info = info->next;
-	}
-
-	return NULL;
-}
-
 static void add_wakeup(unsigned int val, unsigned long long start)
 {
-	unsigned int key = calc_wakeup_key(val);
+	unsigned int key = trace_hash(val);
 	struct wakeup_info *info;
+	struct trace_hash_item *item;
 
-	info = __find_wakeup(key, val);
-	if (info) {
+	item = trace_hash_find(&wakeup_hash, key, NULL, NULL);
+	if (item) {
+		info = container_of(item, struct wakeup_info, hash);
 		/* Hmm, double wakeup? */
 		info->start = start;
 		return;
 	}
 
 	info = malloc_or_die(sizeof(*info));
-	info->pid = val;
+	info->hash.key = val;
 	info->start = start;
-	info->next = wakeup_hash[key];
-	wakeup_hash[key] = info;
+	trace_hash_add(&wakeup_hash, &info->hash);
 }
 
 static unsigned long long max_lat = 0;
@@ -546,16 +597,23 @@ static unsigned long long max_time;
 static unsigned long long min_lat = -1;
 static unsigned long long min_time;
 
-static void add_sched(unsigned int val, unsigned long long end)
+static unsigned long long max_rt_lat = 0;
+static unsigned long long max_rt_time;
+static unsigned long long min_rt_lat = -1;
+static unsigned long long min_rt_time;
+
+static void add_sched(unsigned int val, unsigned long long end, int rt)
 {
-	unsigned int key = calc_wakeup_key(val);
+	struct trace_hash_item *item;
+	unsigned int key = trace_hash(val);
 	struct wakeup_info *info;
-	struct wakeup_info **next;
 	unsigned long long cal;
 
-	info = __find_wakeup(key, val);
-	if (!info)
+	item = trace_hash_find(&wakeup_hash, key, NULL, NULL);
+	if (!item)
 		return;
+
+	info = container_of(item, struct wakeup_info, hash);
 
 	cal = end - info->start;
 
@@ -568,19 +626,28 @@ static void add_sched(unsigned int val, unsigned long long end)
 		min_time = end;
 	}
 
+	if (rt) {
+		if (cal > max_rt_lat) {
+			max_rt_lat = cal;
+			max_rt_time = end;
+		}
+		if (cal < min_rt_lat) {
+			min_rt_lat = cal;
+			min_rt_time = end;
+		}
+	}
+
 	printf(" Latency: %llu.%03llu usecs", cal / 1000, cal % 1000);
 
 	total_wakeup_lat += cal;
 	wakeup_lat_count++;
 
-	next = &wakeup_hash[key];
-	while (*next) {
-		if (*next == info) {
-			*next = info->next;
-			break;
-		}
-		next = &(*next)->next;
+	if (rt) {
+		total_wakeup_rt_lat += cal;
+		wakeup_rt_lat_count++;
 	}
+
+	trace_hash_del(item);
 	free(info);
 }
 
@@ -610,64 +677,143 @@ static void process_wakeup(struct pevent *pevent, struct pevent_record *record)
 			return;
 		add_wakeup(val, record->ts);
 	} else if (id == sched_id) {
+		int rt = 1;
+		if (pevent_read_number_field(sched_prio, record->data, &val))
+			return;
+		if (val > 99)
+			rt = 0;
 		if (pevent_read_number_field(sched_task, record->data, &val))
 			return;
-		add_sched(val, record->ts);
+		add_sched(val, record->ts, rt);
 	}
+}
+
+static void
+show_wakeup_timings(unsigned long long total, unsigned long count,
+		    unsigned long long lat_max, unsigned long long time_max,
+		    unsigned long long lat_min, unsigned long long time_min)
+{
+
+	total /= count;
+
+	printf("\nAverage wakeup latency: %llu.%03llu usecs\n",
+	       total / 1000,
+	       total % 1000);
+	printf("Maximum Latency: %llu.%03llu usecs at ", lat_max / 1000, lat_max % 1000);
+	printf("timestamp: %llu.%06llu\n",
+	       time_max / 1000000000, ((time_max + 500) % 1000000000) / 1000);
+	printf("Minimum Latency: %llu.%03llu usecs at ", lat_min / 1000, lat_min % 1000);
+	printf("timestamp: %llu.%06llu\n\n", time_min / 1000000000,
+	       ((time_min + 500) % 1000000000) / 1000);
 }
 
 static void finish_wakeup(void)
 {
 	struct wakeup_info *info;
-	int i;
+	struct trace_hash_item **bucket;
+	struct trace_hash_item *item;
 
 	if (!show_wakeup || !wakeup_lat_count)
 		return;
 
-	total_wakeup_lat /= wakeup_lat_count;
+	show_wakeup_timings(total_wakeup_lat, wakeup_lat_count,
+			    max_lat, max_time,
+			    min_lat, min_time);
 
-	printf("\nAverage wakeup latency: %llu.%03llu usecs\n",
-	       total_wakeup_lat / 1000,
-	       total_wakeup_lat % 1000);
-	printf("Maximum Latency: %llu.%03llu usecs at ", max_lat / 1000, max_lat % 1000);
-	printf("timestamp: %llu.%06llu\n",
-	       max_time / 1000000000, ((max_time + 500) % 1000000000) / 1000);
-	printf("Minimum Latency: %llu.%03llu usecs at ", min_lat / 1000, min_lat % 1000);
-	printf("timestamp: %llu.%06llu\n\n", min_time / 1000000000,
-	       ((min_time + 500) % 1000000000) / 1000);
 
-	for (i = 0; i < WAKEUP_HASH_SIZE; i++) {
-		while (wakeup_hash[i]) {
-			info = wakeup_hash[i];
-			wakeup_hash[i] = info->next;
+	if (wakeup_rt_lat_count) {
+		printf("RT task timings:\n");
+		show_wakeup_timings(total_wakeup_rt_lat, wakeup_rt_lat_count,
+				    max_rt_lat, max_rt_time,
+				    min_rt_lat, min_rt_time);
+	}
+
+	trace_hash_for_each_bucket(bucket, &wakeup_hash) {
+		trace_hash_while_item(item, bucket) {
+			trace_hash_del(item);
+			info = container_of(item, struct wakeup_info, hash);
 			free(info);
 		}
 	}
+
+	trace_hash_free(&wakeup_hash);
 }
 
-static void show_data(struct tracecmd_input *handle,
-		      struct pevent_record *record, int cpu)
+void trace_show_data(struct tracecmd_input *handle, struct pevent_record *record,
+		     int profile)
 {
 	struct pevent *pevent;
 	struct trace_seq s;
-
-	if (filter_record(handle, record))
-		return;
+	int cpu = record->cpu;
+	bool use_trace_clock;
 
 	pevent = tracecmd_get_pevent(handle);
 
 	test_save(record, cpu);
 
+	if (profile) {
+		trace_profile_record(handle, record, cpu);
+		return;
+	}
+
 	trace_seq_init(&s);
 	if (record->missed_events > 0)
 		trace_seq_printf(&s, "CPU:%d [%lld EVENTS DROPPED]\n",
-				 record->cpu, record->missed_events);
+				 cpu, record->missed_events);
 	else if (record->missed_events < 0)
-		trace_seq_printf(&s, "CPU:%d [EVENTS DROPPED]\n",
-				 record->cpu);
-	pevent_print_event(pevent, &s, record);
+		trace_seq_printf(&s, "CPU:%d [EVENTS DROPPED]\n", cpu);
+	if (buffer_breaks || debug) {
+		if (tracecmd_record_at_buffer_start(handle, record)) {
+			trace_seq_printf(&s, "CPU:%d [SUBBUFFER START]", cpu);
+			if (debug)
+				trace_seq_printf(&s, " [%lld]",
+						 tracecmd_page_ts(handle, record));
+			trace_seq_putc(&s, '\n');
+		}
+	}
+	use_trace_clock = tracecmd_get_use_trace_clock(handle);
+	pevent_print_event(pevent, &s, record, use_trace_clock);
 	if (s.len && *(s.buffer + s.len - 1) == '\n')
 		s.len--;
+	if (debug) {
+		struct kbuffer *kbuf;
+		struct kbuffer_raw_info info;
+		void *page;
+		void *offset;
+
+		trace_seq_printf(&s, " [%d]",
+				 tracecmd_record_ts_delta(handle, record));
+		kbuf = tracecmd_record_kbuf(handle, record);
+		page = tracecmd_record_page(handle, record);
+		offset = tracecmd_record_offset(handle, record);
+
+		if (kbuf && page && offset) {
+			struct kbuffer_raw_info *pi = &info;
+
+			/* We need to get the record raw data to get next */
+			pi->next = offset;
+			pi = kbuffer_raw_get(kbuf, page, pi);
+			while ((pi = kbuffer_raw_get(kbuf, page, pi))) {
+				if (pi->type < KBUFFER_TYPE_PADDING)
+					break;
+				switch (pi->type) {
+				case KBUFFER_TYPE_PADDING:
+					trace_seq_printf(&s, "\n PADDING: ");
+					break;
+				case KBUFFER_TYPE_TIME_EXTEND:
+					trace_seq_printf(&s, "\n TIME EXTEND: ");
+					break;
+				case KBUFFER_TYPE_TIME_STAMP:
+					trace_seq_printf(&s, "\n TIME STAMP?: ");
+					break;
+				}
+				trace_seq_printf(&s, "delta:%lld length:%d",
+						 pi->delta,
+						 pi->length);
+			}
+		}
+	}
+		
 	trace_seq_do_printf(&s);
 	trace_seq_destroy(&s);
 
@@ -712,13 +858,94 @@ test_filters(struct filter *event_filters, struct pevent_record *record, int neg
 	return ret;
 }
 
-static struct pevent_record *
-get_next_record(struct handle_list *handles, int *next_cpu)
+struct stack_info_cpu {
+	int			cpu;
+	int			last_printed;
+};
+
+struct stack_info {
+	struct stack_info	*next;
+	struct handle_list	*handles;
+	struct stack_info_cpu	*cpus;
+	int			stacktrace_id;
+	int			nr_cpus;
+};
+
+static int
+test_stacktrace(struct handle_list *handles, struct pevent_record *record,
+		int last_printed)
 {
-	unsigned long long ts;
+	static struct stack_info *infos;
+	struct stack_info *info;
+	struct stack_info_cpu *cpu_info;
+	struct handle_list *h;
+	struct tracecmd_input *handle;
+	struct event_format *event;
+	struct pevent *pevent;
+	static int init;
+	int ret;
+	int id;
+
+	if (!init) {
+		init = 1;
+
+		list_for_each_entry(h, &handle_list, list) {
+			info = malloc_or_die(sizeof(*info));
+			info->handles = h;
+			info->nr_cpus = tracecmd_cpus(h->handle);
+
+			info->cpus = malloc_or_die(sizeof(*info->cpus) * info->nr_cpus);
+			memset(info->cpus, 0, sizeof(*info->cpus));
+
+			pevent = tracecmd_get_pevent(h->handle);
+			event = pevent_find_event_by_name(pevent, "ftrace",
+							  "kernel_stack");
+			if (event)
+				info->stacktrace_id = event->id;
+			else
+				info->stacktrace_id = 0;
+
+			info->next = infos;
+			infos = info;
+		}
+
+
+	}
+
+	handle = handles->handle;
+	pevent = tracecmd_get_pevent(handle);
+
+	for (info = infos; info; info = info->next)
+		if (info->handles == handles)
+			break;
+
+	if (!info->stacktrace_id)
+		return 0;
+
+	cpu_info = &info->cpus[record->cpu];
+
+	id = pevent_data_type(pevent, record);
+
+	/*
+	 * Print the stack trace if the previous event was printed.
+	 * But do not print the stack trace if it is explicitly
+	 * being filtered out.
+	 */
+	if (id == info->stacktrace_id) {
+		ret = test_filters(handles->event_filter_out, record, 1);
+		if (ret != FILTER_MATCH)
+			return cpu_info->last_printed;
+		return 0;
+	}
+
+	cpu_info->last_printed = last_printed;
+	return 0;
+}
+
+static struct pevent_record *get_next_record(struct handle_list *handles)
+{
 	struct pevent_record *record;
 	int found = 0;
-	int next;
 	int cpu;
 	int ret;
 
@@ -729,8 +956,6 @@ get_next_record(struct handle_list *handles, int *next_cpu)
 		return NULL;
 
 	do {
-		next = -1;
-		ts = 0;
 		if (filter_cpus) {
 			long long last_stamp = -1;
 			struct pevent_record *precord;
@@ -757,8 +982,17 @@ get_next_record(struct handle_list *handles, int *next_cpu)
 		if (record) {
 			ret = test_filters(handles->event_filters, record, 0);
 			switch (ret) {
+			case FILTER_NOEXIST:
+				/* Stack traces may still filter this */
+				if (stacktrace_id &&
+				    test_stacktrace(handles, record, 0))
+					found = 1;
+				else
+					free_record(record);
+				break;
 			case FILTER_NONE:
 			case FILTER_MATCH:
+				/* Test the negative filters (-v) */
 				ret = test_filters(handles->event_filter_out, record, 1);
 				if (ret != FILTER_MATCH) {
 					found = 1;
@@ -771,10 +1005,12 @@ get_next_record(struct handle_list *handles, int *next_cpu)
 		}
 	} while (record && !found);
 
+	if (record && stacktrace_id)
+		test_stacktrace(handles, record, 1);
+
 	handles->record = record;
 	if (!record)
 		handles->done = 1;
-	*next_cpu = next;
 
 	return record;
 }
@@ -791,9 +1027,12 @@ static void free_handle_record(struct handle_list *handles)
 static void print_handle_file(struct handle_list *handles)
 {
 	/* Only print file names if more than one file is read */
-	if (!multi_inputs)
+	if (!multi_inputs && !instances)
 		return;
-	printf("%*s: ", max_file_size, handles->file);
+	if (handles->file)
+		printf("%*s: ", max_file_size, handles->file);
+	else
+		printf("%*s  ", max_file_size, "");
 }
 
 static void free_filters(struct filter *event_filter)
@@ -809,18 +1048,29 @@ static void free_filters(struct filter *event_filter)
 	}
 }
 
-static void read_data_info(struct list_head *handle_list, int stat_only)
+enum output_type {
+	OUTPUT_NORMAL,
+	OUTPUT_STAT_ONLY,
+	OUTPUT_UNAME_ONLY,
+};
+
+static void read_data_info(struct list_head *handle_list, enum output_type otype,
+			   int global)
 {
 	struct handle_list *handles;
 	struct handle_list *last_handle;
 	struct pevent_record *record;
 	struct pevent_record *last_record;
-	int last_cpu;
+	struct event_format *event;
+	struct pevent *pevent;
 	int cpus;
-	int next;
 	int ret;
 
 	list_for_each_entry(handles, handle_list, list) {
+
+		/* Don't process instances that we added here */
+		if (tracecmd_is_buffer_instance(handles->handle))
+			continue;
 
 		ret = tracecmd_init_data(handles->handle);
 		if (ret < 0)
@@ -839,19 +1089,57 @@ static void read_data_info(struct list_head *handle_list, int stat_only)
 			return;
 		}
 
-		if (stat_only) {
+		switch (otype) {
+		case OUTPUT_NORMAL:
+			break;
+		case OUTPUT_STAT_ONLY:
 			printf("\nKernel buffer statistics:\n"
 			       "  Note: \"entries\" are the entries left in the kernel ring buffer and are not\n"
 			       "        recorded in the trace data. They should all be zero.\n\n");
 			tracecmd_print_stats(handles->handle);
 			continue;
+		case OUTPUT_UNAME_ONLY:
+			tracecmd_print_uname(handles->handle);
+			continue;
 		}
 
+		/* Find the kernel_stacktrace if available */
+		pevent = tracecmd_get_pevent(handles->handle);
+		event = pevent_find_event_by_name(pevent, "ftrace", "kernel_stack");
+		if (event)
+			stacktrace_id = event->id;
+
 		init_wakeup(handles->handle);
+		if (last_hook)
+			last_hook->next = tracecmd_hooks(handles->handle);
+		else
+			hooks = tracecmd_hooks(handles->handle);
+		trace_init_profile(handles->handle, hooks, global);
+
 		process_filters(handles);
+
+		/* If this file has buffer instances, get the handles for them */
+		instances = tracecmd_buffer_instances(handles->handle);
+		if (instances) {
+			struct tracecmd_input *new_handle;
+			const char *name;
+			int i;
+
+			for (i = 0; i < instances; i++) {
+				name = tracecmd_buffer_instance_name(handles->handle, i);
+				if (!name)
+					die("error in reading buffer instance");
+				new_handle = tracecmd_buffer_instance_handle(handles->handle, i);
+				if (!new_handle) {
+					warning("could not retreive handle %s", name);
+					continue;
+				}
+				add_handle(new_handle, name);
+			}
+		}
 	}
 
-	if (stat_only)
+	if (otype != OUTPUT_NORMAL)
 		return;
 
 	do {
@@ -859,20 +1147,22 @@ static void read_data_info(struct list_head *handle_list, int stat_only)
 		last_record = NULL;
 
 		list_for_each_entry(handles, handle_list, list) {
-			record = get_next_record(handles, &next);
+			record = get_next_record(handles);
 			if (!last_record ||
 			    (record && record->ts < last_record->ts)) {
 				last_record = record;
 				last_handle = handles;
-				last_cpu = next;
 			}
 		}
 		if (last_record) {
 			print_handle_file(last_handle);
-			show_data(last_handle->handle, last_record, last_cpu);
+			trace_show_data(last_handle->handle, last_record, profile);
 			free_handle_record(last_handle);
 		}
 	} while (last_record);
+
+	if (profile)
+		trace_profile();
 
 	list_for_each_entry(handles, handle_list, list) {
 		free_filters(handles->event_filters);
@@ -1018,7 +1308,26 @@ static void set_event_flags(struct pevent *pevent, struct event_str *list,
 	}
 }
 
+static void add_hook(const char *arg)
+{
+	struct hook_list *hook;
+
+	hook = tracecmd_create_event_hook(arg);
+
+	hook->next = hooks;
+	hooks = hook;
+	if (!last_hook)
+		last_hook = hook;
+}
+
 enum {
+	OPT_bycomm	= 242,
+	OPT_debug	= 243,
+	OPT_uname	= 244,
+	OPT_profile	= 245,
+	OPT_event	= 246,
+	OPT_comm	= 247,
+	OPT_boundary	= 248,
 	OPT_stat	= 249,
 	OPT_pid		= 250,
 	OPT_nodate	= 251,
@@ -1037,19 +1346,23 @@ void trace_report (int argc, char **argv)
 	struct event_str **raw_ptr = &raw_events;
 	struct event_str **nohandler_ptr = &nohandler_events;
 	const char *functions = NULL;
+	const char *print_event = NULL;
 	struct input_files *inputs;
 	struct handle_list *handles;
+	enum output_type otype;
 	int show_stat = 0;
 	int show_funcs = 0;
 	int show_endian = 0;
 	int show_page_size = 0;
 	int show_printk = 0;
+	int show_uname = 0;
 	int latency_format = 0;
 	int show_events = 0;
 	int print_events = 0;
 	int test_filters = 0;
 	int nanosec = 0;
 	int no_date = 0;
+	int global = 0;
 	int raw = 0;
 	int neg = 0;
 	int ret = 0;
@@ -1072,18 +1385,25 @@ void trace_report (int argc, char **argv)
 		static struct option long_options[] = {
 			{"cpu", required_argument, NULL, OPT_cpu},
 			{"events", no_argument, NULL, OPT_events},
+			{"event", required_argument, NULL, OPT_event},
 			{"filter-test", no_argument, NULL, 'T'},
 			{"kallsyms", required_argument, NULL, OPT_kallsyms},
 			{"pid", required_argument, NULL, OPT_pid},
+			{"comm", required_argument, NULL, OPT_comm},
 			{"check-events", no_argument, NULL,
 				OPT_check_event_parsing},
 			{"nodate", no_argument, NULL, OPT_nodate},
 			{"stat", no_argument, NULL, OPT_stat},
+			{"boundary", no_argument, NULL, OPT_boundary},
+			{"debug", no_argument, NULL, OPT_debug},
+			{"profile", no_argument, NULL, OPT_profile},
+			{"uname", no_argument, NULL, OPT_uname},
+			{"by-comm", no_argument, NULL, OPT_bycomm},
 			{"help", no_argument, NULL, '?'},
 			{NULL, 0, NULL, 0}
 		};
 
-		c = getopt_long (argc-1, argv+1, "+hi:fepRr:tPNn:LlEwF:VvTqO:",
+		c = getopt_long (argc-1, argv+1, "+hi:H:feGpRr:tPNn:LlEwF:VvTqO:",
 			long_options, &option_index);
 		if (c == -1)
 			break;
@@ -1102,6 +1422,9 @@ void trace_report (int argc, char **argv)
 			break;
 		case 'F':
 			add_filter(optarg, neg);
+			break;
+		case 'H':
+			add_hook(optarg);
 			break;
 		case 'T':
 			test_filters = 1;
@@ -1132,6 +1455,9 @@ void trace_report (int argc, char **argv)
 			break;
 		case 'E':
 			show_events = 1;
+			break;
+		case 'G':
+			global = 1;
 			break;
 		case 'R':
 			raw = 1;
@@ -1171,11 +1497,17 @@ void trace_report (int argc, char **argv)
 		case OPT_events:
 			print_events = 1;
 			break;
+		case OPT_event:
+			print_event = optarg;
+			break;
 		case OPT_kallsyms:
 			functions = optarg;
 			break;
 		case OPT_pid:
 			add_pid_filter(optarg);
+			break;
+		case OPT_comm:
+			add_comm_filter(optarg);
 			break;
 		case OPT_check_event_parsing:
 			check_event_parsing = 1;
@@ -1185,6 +1517,23 @@ void trace_report (int argc, char **argv)
 			break;
 		case OPT_stat:
 			show_stat = 1;
+			break;
+		case OPT_boundary:
+			/* Debug to look at buffer breaks */
+			buffer_breaks = 1;
+			break;
+		case OPT_debug:
+			buffer_breaks = 1;
+			debug = 1;
+			break;
+		case OPT_profile:
+			profile = 1;
+			break;
+		case OPT_uname:
+			show_uname = 1;
+			break;
+		case OPT_bycomm:
+			trace_profile_set_merge_like_comms();
 			break;
 		default:
 			usage(argv);
@@ -1209,7 +1558,9 @@ void trace_report (int argc, char **argv)
 		handle = read_trace_header(inputs->file);
 		if (!handle)
 			die("error reading header for %s", inputs->file);
-		add_handle(handle, inputs->file);
+
+		/* If used with instances, top instance will have no tag */
+		add_handle(handle, multi_inputs ? inputs->file : NULL);
 
 		if (no_date)
 			tracecmd_set_flag(handle, TRACECMD_FL_IGNORE_DATE);
@@ -1245,7 +1596,12 @@ void trace_report (int argc, char **argv)
 		}
 
 		if (print_events) {
-			tracecmd_print_events(handle);
+			tracecmd_print_events(handle, NULL);
+			return;
+		}
+
+		if (print_event) {
+			tracecmd_print_events(handle, print_event);
 			return;
 		}
 
@@ -1291,7 +1647,14 @@ void trace_report (int argc, char **argv)
 	if (latency_format)
 		pevent_set_latency_format(pevent, latency_format);
 
-	read_data_info(&handle_list, show_stat);
+	otype = OUTPUT_NORMAL;
+
+	if (show_stat)
+		otype = OUTPUT_STAT_ONLY;
+	/* yeah yeah, uname overrides stat */
+	if (show_uname)
+		otype = OUTPUT_UNAME_ONLY;
+	read_data_info(&handle_list, otype, global);
 
 	list_for_each_entry(handles, &handle_list, list) {
 		tracecmd_close(handles->handle);
