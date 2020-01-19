@@ -1,8 +1,7 @@
-From fca725695474085397339abe07de4a91a781269e Mon Sep 17 00:00:00 2001
+From f9946d86f4eff2e109b625a93697cb8864c7a158 Mon Sep 17 00:00:00 2001
 From: Daniel Bristot de Oliveira <bristot@redhat.com>
-Date: Mon, 20 Jul 2015 14:51:00 -0300
-Subject: [PATCH 083/134] trace-cmd: record crashes if -f is used before -e
- event.
+Date: Fri, 15 Jul 2016 14:21:58 +0200
+Subject: [PATCH] trace-cmd: record crashes if -f is used before -e event
 
 The trace-cmd record command is crashing if a -f filter is used before
 a -e event.
@@ -25,20 +24,17 @@ Expected output:
   # trace-cmd record -f foo
   filter must come after event
 
-Link: http://lkml.kernel.org/r/894eb6c8a5665fba64811395e0d1204e201f4992.1437414265.git.bristot@redhat.com
-
-Tested-by: John Kacur <jkacur@redhat.com>
 Signed-off-by: Daniel Bristot de Oliveira <bristot@redhat.com>
-Signed-off-by: Steven Rostedt <rostedt@goodmis.org>
+Signed-off-by: John Kacur <jkacur@redhat.com>
 ---
  trace-record.c | 2 +-
  1 file changed, 1 insertion(+), 1 deletion(-)
 
 diff --git a/trace-record.c b/trace-record.c
-index fc124b7f1e98..22b6835c0d5b 100644
+index a8d32d34ce16..ab64418c7b4c 100644
 --- a/trace-record.c
 +++ b/trace-record.c
-@@ -4131,7 +4131,7 @@ void trace_record (int argc, char **argv)
+@@ -3803,7 +3803,7 @@ void trace_record (int argc, char **argv)
  	const char *output = NULL;
  	const char *option;
  	struct event_list *event = NULL;
@@ -48,5 +44,5 @@ index fc124b7f1e98..22b6835c0d5b 100644
  	enum trace_type type = 0;
  	char *pids;
 -- 
-2.5.5
+2.4.11
 
