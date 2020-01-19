@@ -1,0 +1,163 @@
+From 4a3af292c2b1e78c2c68b9405142cac82acc98cb Mon Sep 17 00:00:00 2001
+From: Arnaldo Carvalho de Melo <acme@redhat.com>
+Date: Wed, 22 Jul 2015 12:36:55 -0300
+Subject: [PATCH 024/134] tools lib traceevent: Allow setting an alternative
+ symbol resolver
+
+The perf tools have a symbol resolver that includes solving kernel
+symbols using either kallsyms or ELF symtabs, and it also is using
+libtraceevent to format the trace events fields, including via
+subsystem specific plugins, like the "timer" one.
+
+To solve fields like "timer:hrtimer_start"'s "function", libtraceevent
+needs a way to map from its value to a function name and addr.
+
+This patch provides a way for tools that already have symbol resolving
+facilities to ask libtraceevent to use it when needing to resolve
+kernel symbols.
+
+Reviewed-by: Steven Rostedt <rostedt@goodmis.org>
+Acked-by: David Ahern <dsahern@gmail.com>
+Cc: Adrian Hunter <adrian.hunter@intel.com>
+Cc: Borislav Petkov <bp@suse.de>
+Cc: Frederic Weisbecker <fweisbec@gmail.com>
+Cc: Jiri Olsa <jolsa@redhat.com>
+Cc: Namhyung Kim <namhyung@kernel.org>
+Cc: Stephane Eranian <eranian@google.com>
+Link: http://lkml.kernel.org/n/tip-fdx1fazols17w5py26ia3bwh@git.kernel.org
+Signed-off-by: Arnaldo Carvalho de Melo <acme@redhat.com>
+Signed-off-by: Steven Rostedt <rostedt@goodmis.org>
+---
+ event-parse.c | 68 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++-
+ event-parse.h |  8 +++++++
+ 2 files changed, 75 insertions(+), 1 deletion(-)
+
+diff --git a/event-parse.c b/event-parse.c
+index 24373d4fa6e7..14d6d7bbe0e9 100644
+--- a/event-parse.c
++++ b/event-parse.c
+@@ -418,7 +418,7 @@ static int func_map_init(struct pevent *pevent)
+ }
+ 
+ static struct func_map *
+-find_func(struct pevent *pevent, unsigned long long addr)
++__find_func(struct pevent *pevent, unsigned long long addr)
+ {
+ 	struct func_map *func;
+ 	struct func_map key;
+@@ -434,6 +434,71 @@ find_func(struct pevent *pevent, unsigned long long addr)
+ 	return func;
+ }
+ 
++struct func_resolver {
++	pevent_func_resolver_t *func;
++	void		       *priv;
++	struct func_map	       map;
++};
++
++/**
++ * pevent_set_function_resolver - set an alternative function resolver
++ * @pevent: handle for the pevent
++ * @resolver: function to be used
++ * @priv: resolver function private state.
++ *
++ * Some tools may have already a way to resolve kernel functions, allow them to
++ * keep using it instead of duplicating all the entries inside
++ * pevent->funclist.
++ */
++int pevent_set_function_resolver(struct pevent *pevent,
++				 pevent_func_resolver_t *func, void *priv)
++{
++	struct func_resolver *resolver = malloc(sizeof(*resolver));
++
++	if (resolver == NULL)
++		return -1;
++
++	resolver->func = func;
++	resolver->priv = priv;
++
++	free(pevent->func_resolver);
++	pevent->func_resolver = resolver;
++
++	return 0;
++}
++
++/**
++ * pevent_reset_function_resolver - reset alternative function resolver
++ * @pevent: handle for the pevent
++ *
++ * Stop using whatever alternative resolver was set, use the default
++ * one instead.
++ */
++void pevent_reset_function_resolver(struct pevent *pevent)
++{
++	free(pevent->func_resolver);
++	pevent->func_resolver = NULL;
++}
++
++static struct func_map *
++find_func(struct pevent *pevent, unsigned long long addr)
++{
++	struct func_map *map;
++
++	if (!pevent->func_resolver)
++		return __find_func(pevent, addr);
++
++	map = &pevent->func_resolver->map;
++	map->mod  = NULL;
++	map->addr = addr;
++	map->func = pevent->func_resolver->func(pevent->func_resolver->priv,
++						&map->addr, &map->mod);
++	if (map->func == NULL)
++		return NULL;
++
++	return map;
++}
++
+ /**
+  * pevent_find_function - find a function by a given address
+  * @pevent: handle for the pevent
+@@ -6573,6 +6638,7 @@ void pevent_free(struct pevent *pevent)
+ 	free(pevent->trace_clock);
+ 	free(pevent->events);
+ 	free(pevent->sort_events);
++	free(pevent->func_resolver);
+ 
+ 	free(pevent);
+ }
+diff --git a/event-parse.h b/event-parse.h
+index 1705425ded68..72639d5d7539 100644
+--- a/event-parse.h
++++ b/event-parse.h
+@@ -455,6 +455,10 @@ struct cmdline_list;
+ struct func_map;
+ struct func_list;
+ struct event_handler;
++struct func_resolver;
++
++typedef char *(pevent_func_resolver_t)(void *priv,
++				       unsigned long long *addrp, char **modp);
+ 
+ struct pevent {
+ 	int ref_count;
+@@ -483,6 +487,7 @@ struct pevent {
+ 	int cmdline_count;
+ 
+ 	struct func_map *func_map;
++	struct func_resolver *func_resolver;
+ 	struct func_list *funclist;
+ 	unsigned int func_count;
+ 
+@@ -615,6 +620,9 @@ enum trace_flag_type {
+ 	TRACE_FLAG_SOFTIRQ		= 0x10,
+ };
+ 
++int pevent_set_function_resolver(struct pevent *pevent,
++				 pevent_func_resolver_t *func, void *priv);
++void pevent_reset_function_resolver(struct pevent *pevent);
+ int pevent_register_comm(struct pevent *pevent, const char *comm, int pid);
+ int pevent_register_trace_clock(struct pevent *pevent, const char *trace_clock);
+ int pevent_register_function(struct pevent *pevent, char *name,
+-- 
+2.5.5
+

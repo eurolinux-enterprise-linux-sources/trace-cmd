@@ -1,0 +1,59 @@
+From 4421d9551b903d720bb8534a02c3564187eab045 Mon Sep 17 00:00:00 2001
+From: Jan Kiszka <jan.kiszka@siemens.com>
+Date: Sun, 22 May 2016 18:02:42 +0200
+Subject: [PATCH 077/134] trace-cmd: Add more SVM exit reasons
+
+Exceptions require individual decoding (only feasible intercepts
+listed), XSETBV was missing and the AVIC brought in two new exit codes.
+
+Link: http://lkml.kernel.org/r/5741D822.3030203@web.de
+
+Signed-off-by: Jan Kiszka <jan.kiszka@siemens.com>
+Signed-off-by: Steven Rostedt <rostedt@goodmis.org>
+---
+ plugin_kvm.c | 21 ++++++++++++++++++++-
+ 1 file changed, 20 insertions(+), 1 deletion(-)
+
+diff --git a/plugin_kvm.c b/plugin_kvm.c
+index 57140b324b4d..bedcc958a117 100644
+--- a/plugin_kvm.c
++++ b/plugin_kvm.c
+@@ -151,7 +151,23 @@ static const char *disassemble(unsigned char *insn, int len, uint64_t rip,
+ 	_ER(EXIT_WRITE_DR5,	0x035)		\
+ 	_ER(EXIT_WRITE_DR6,	0x036)		\
+ 	_ER(EXIT_WRITE_DR7,	0x037)		\
+-	_ER(EXIT_EXCP_BASE,     0x040)		\
++	_ER(EXIT_EXCP_DE,	0x040)		\
++	_ER(EXIT_EXCP_DB,	0x041)		\
++	_ER(EXIT_EXCP_BP,	0x043)		\
++	_ER(EXIT_EXCP_OF,	0x044)		\
++	_ER(EXIT_EXCP_BR,	0x045)		\
++	_ER(EXIT_EXCP_UD,	0x046)		\
++	_ER(EXIT_EXCP_NM,	0x047)		\
++	_ER(EXIT_EXCP_DF,	0x048)		\
++	_ER(EXIT_EXCP_TS,	0x04a)		\
++	_ER(EXIT_EXCP_NP,	0x04b)		\
++	_ER(EXIT_EXCP_SS,	0x04c)		\
++	_ER(EXIT_EXCP_GP,	0x04d)		\
++	_ER(EXIT_EXCP_PF,	0x04e)		\
++	_ER(EXIT_EXCP_MF,	0x050)		\
++	_ER(EXIT_EXCP_AC,	0x051)		\
++	_ER(EXIT_EXCP_MC,	0x052)		\
++	_ER(EXIT_EXCP_XF,	0x053)		\
+ 	_ER(EXIT_INTR,		0x060)		\
+ 	_ER(EXIT_NMI,		0x061)		\
+ 	_ER(EXIT_SMI,		0x062)		\
+@@ -197,7 +213,10 @@ static const char *disassemble(unsigned char *insn, int len, uint64_t rip,
+ 	_ER(EXIT_MONITOR,	0x08a)		\
+ 	_ER(EXIT_MWAIT,		0x08b)		\
+ 	_ER(EXIT_MWAIT_COND,	0x08c)		\
++	_ER(EXIT_XSETBV,	0x08d)		\
+ 	_ER(EXIT_NPF, 		0x400)		\
++	_ER(EXIT_AVIC_INCOMPLETE_IPI,		0x401)	\
++	_ER(EXIT_AVIC_UNACCELERATED_ACCESS,	0x402)	\
+ 	_ER(EXIT_ERR,		-1)
+ 
+ #define _ER(reason, val)	{ #reason, val },
+-- 
+2.5.5
+

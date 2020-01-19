@@ -1,0 +1,30 @@
+From a90b5a89d4c9e1427cc93f4496501625b093beda Mon Sep 17 00:00:00 2001
+From: "Steven Rostedt (Red Hat)" <rostedt@goodmis.org>
+Date: Tue, 1 Dec 2015 15:37:13 -0500
+Subject: [PATCH 020/134] trace-cmd: Truncate files when writing to them
+
+Some files require truncation to happen to make them do anything, like
+writing "" to them. For reseting the files (and writing to debugfs files in
+general), open with O_TRUNC, to reset them as they are opened.
+
+Signed-off-by: Steven Rostedt <rostedt@goodmis.org>
+---
+ trace-record.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/trace-record.c b/trace-record.c
+index cf30176cd47c..df8288300297 100644
+--- a/trace-record.c
++++ b/trace-record.c
+@@ -1498,7 +1498,7 @@ static int write_file(const char *file, const char *str, const char *type)
+ 	int fd;
+ 	int ret;
+ 
+-	fd = open(file, O_WRONLY);
++	fd = open(file, O_WRONLY | O_TRUNC);
+ 	if (fd < 0)
+ 		die("opening to '%s'", file);
+ 	ret = write(fd, str, strlen(str));
+-- 
+2.5.5
+

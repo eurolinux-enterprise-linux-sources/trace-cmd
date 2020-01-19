@@ -1,0 +1,175 @@
+From 49e017a0358bfa2e84d7242ecac27a1767ca3b63 Mon Sep 17 00:00:00 2001
+From: "Steven Rostedt (Red Hat)" <rostedt@goodmis.org>
+Date: Tue, 23 Feb 2016 14:23:54 -0500
+Subject: [PATCH 047/134] trace-cmd record: Add --ts-offset for timestamp of
+ events
+
+Add an option to allow users to add a timestamp offset to all events. This
+is useful when wanting to merge the resulting trace.dat file with another
+trace.dat file where the timestamps are shifted by a given offset.
+Specifically for virtual machines, where the host and guest have a known
+offset, and the recording of the host (or guest) can use this option to
+remove the need to add it when merging the trace.dat files together.
+
+Signed-off-by: Steven Rostedt <rostedt@goodmis.org>
+---
+ Documentation/trace-cmd-record.1.txt |  8 ++++++++
+ trace-cmd.h                          |  1 +
+ trace-input.c                        | 12 +++++++++++-
+ trace-record.c                       | 37 +++++++++++++++++++++++++++++++-----
+ 4 files changed, 52 insertions(+), 6 deletions(-)
+
+diff --git a/Documentation/trace-cmd-record.1.txt b/Documentation/trace-cmd-record.1.txt
+index 2a368fed11f7..d88050d87558 100644
+--- a/Documentation/trace-cmd-record.1.txt
++++ b/Documentation/trace-cmd-record.1.txt
+@@ -286,6 +286,14 @@ OPTIONS
+ 
+     See trace-cmd-profile(1) for format.
+ 
++*--ts-offset offset*::
++    Add an offset for the timestamp in the trace.dat file. This will add a
++    offset option into the trace.dat file such that a trace-cmd report will
++    offset all the timestamps of the events by the given offset. The offset
++    is in raw units. That is, if the event timestamps are in nanoseconds
++    the offset will also be in nanoseconds even if the displayed units are
++    in microseconds.
++
+ *--stderr*::
+     Have output go to stderr instead of stdout, but the output of the command
+     executed will not be changed. This is useful if you want to monitor the
+diff --git a/trace-cmd.h b/trace-cmd.h
+index ad3a505110d6..526ced280e6b 100644
+--- a/trace-cmd.h
++++ b/trace-cmd.h
+@@ -89,6 +89,7 @@ enum {
+ 	TRACECMD_OPTION_TRACECLOCK,
+ 	TRACECMD_OPTION_UNAME,
+ 	TRACECMD_OPTION_HOOK,
++	TRACECMD_OPTION_OFFSET,
+ };
+ 
+ enum {
+diff --git a/trace-input.c b/trace-input.c
+index 07b5aab07ec3..5e6464200d0c 100644
+--- a/trace-input.c
++++ b/trace-input.c
+@@ -1980,7 +1980,17 @@ static int handle_options(struct tracecmd_input *handle)
+ 			offset = strtoll(buf, NULL, 0);
+ 			/* Convert from micro to nano */
+ 			offset *= 1000;
+-			handle->ts_offset = offset;
++			handle->ts_offset += offset;
++			break;
++		case TRACECMD_OPTION_OFFSET:
++			/*
++			 * Similar to date option, but just adds an
++			 * offset to the timestamp.
++			 */
++			if (handle->flags & TRACECMD_FL_IGNORE_DATE)
++				break;
++			offset = strtoll(buf, NULL, 0);
++			handle->ts_offset += offset;
+ 			break;
+ 		case TRACECMD_OPTION_CPUSTAT:
+ 			buf[size-1] = '\n';
+diff --git a/trace-record.c b/trace-record.c
+index 84e311fba412..ea47848a3735 100644
+--- a/trace-record.c
++++ b/trace-record.c
+@@ -2862,7 +2862,13 @@ static void print_stat(struct buffer_instance *instance)
+ 		trace_seq_do_printf(&instance->s_print[cpu]);
+ }
+ 
+-static void record_data(char *date2ts)
++enum {
++	DATA_FL_NONE		= 0,
++	DATA_FL_DATE		= 1,
++	DATA_FL_OFFSET		= 2,
++};
++
++static void record_data(char *date2ts, int flags)
+ {
+ 	struct tracecmd_option **buffer_options;
+ 	struct tracecmd_output *handle;
+@@ -2901,9 +2907,18 @@ static void record_data(char *date2ts)
+ 		if (!handle)
+ 			die("Error creating output file");
+ 
+-		if (date2ts)
+-			tracecmd_add_option(handle, TRACECMD_OPTION_DATE,
+-					    strlen(date2ts)+1, date2ts);
++		if (date2ts) {
++			int type = 0;
++
++			if (flags & DATA_FL_DATE)
++				type = TRACECMD_OPTION_DATE;
++			else if (flags & DATA_FL_OFFSET)
++				type = TRACECMD_OPTION_OFFSET;
++
++			if (type)
++				tracecmd_add_option(handle, type,
++						    strlen(date2ts)+1, date2ts);
++		}
+ 
+ 		/* Only record the top instance under TRACECMD_OPTION_CPUSTAT*/
+ 		if (!no_top_instance()) {
+@@ -3995,6 +4010,7 @@ void update_first_instance(struct buffer_instance *instance, int topt)
+ }
+ 
+ enum {
++	OPT_tsoffset	= 249,
+ 	OPT_bycomm	= 250,
+ 	OPT_stderr	= 251,
+ 	OPT_profile	= 252,
+@@ -4032,6 +4048,7 @@ void trace_record (int argc, char **argv)
+ 	int manual = 0;
+ 	int topt = 0;
+ 	int do_child = 0;
++	int data_flags = 0;
+ 
+ 	int c;
+ 
+@@ -4198,6 +4215,7 @@ void trace_record (int argc, char **argv)
+ 			{"profile", no_argument, NULL, OPT_profile},
+ 			{"stderr", no_argument, NULL, OPT_stderr},
+ 			{"by-comm", no_argument, NULL, OPT_bycomm},
++			{"ts-offset", required_argument, NULL, OPT_tsoffset},
+ 			{"help", no_argument, NULL, '?'},
+ 			{NULL, 0, NULL, 0}
+ 		};
+@@ -4429,6 +4447,9 @@ void trace_record (int argc, char **argv)
+ 			break;
+ 		case OPT_date:
+ 			date = 1;
++			if (data_flags & DATA_FL_OFFSET)
++				die("Can not use both --date and --ts-offset");
++			data_flags |= DATA_FL_DATE;
+ 			break;
+ 		case OPT_funcstack:
+ 			func_stack = 1;
+@@ -4451,6 +4472,12 @@ void trace_record (int argc, char **argv)
+ 		case OPT_bycomm:
+ 			trace_profile_set_merge_like_comms();
+ 			break;
++		case OPT_tsoffset:
++			date2ts = strdup(optarg);
++			if (data_flags & DATA_FL_DATE)
++				die("Can not use both --date and --ts-offset");
++			data_flags |= DATA_FL_OFFSET;
++			break;
+ 		default:
+ 			usage(argv);
+ 		}
+@@ -4614,7 +4641,7 @@ void trace_record (int argc, char **argv)
+ 	}
+ 
+ 	if (record || extract) {
+-		record_data(date2ts);
++		record_data(date2ts, data_flags);
+ 		delete_thread_data();
+ 	} else
+ 		print_stats();
+-- 
+2.5.5
+

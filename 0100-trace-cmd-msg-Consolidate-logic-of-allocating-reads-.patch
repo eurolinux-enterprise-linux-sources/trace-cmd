@@ -1,0 +1,85 @@
+From 7a96111611ed8e67a0a371be04779609a2483a7e Mon Sep 17 00:00:00 2001
+From: "Steven Rostedt (Red Hat)" <rostedt@goodmis.org>
+Date: Wed, 14 Sep 2016 18:54:30 -0400
+Subject: [PATCH 100/134] trace-cmd msg: Consolidate logic of allocating reads
+ of RINIT and SENDMETA
+
+As the logic of allocating RINIT and SENDMETA on read is the same except for
+sizes and where to store the dynamic data, create a helper funtion that
+performs the algorithm for both of them.
+
+Signed-off-by: Steven Rostedt <rostedt@goodmis.org>
+---
+ trace-msg.c | 48 ++++++++++++++++++++++++------------------------
+ 1 file changed, 24 insertions(+), 24 deletions(-)
+
+diff --git a/trace-msg.c b/trace-msg.c
+index 03c48cebc92b..62a9c194df9e 100644
+--- a/trace-msg.c
++++ b/trace-msg.c
+@@ -309,6 +309,26 @@ static int msg_read(int fd, void *buf, u32 size, int *n)
+ 	return 0;
+ }
+ 
++static int msg_read_extra(int fd, void *buf, int *n,
++			  int size, int min_size, void **addr)
++{
++	int rsize;
++	int ret;
++
++	rsize = min_size - *n;
++	ret = msg_read(fd, buf, rsize, n);
++	if (ret < 0)
++		return ret;
++	size -= *n;
++	if (size < 0)
++		return -ENOMSG;
++	*addr = malloc(size);
++	if (!*addr)
++		return -ENOMEM;
++	*n = 0;
++	return msg_read(fd, *addr, size, n);
++}
++
+ static int tracecmd_msg_read_extra(int fd, struct tracecmd_msg *msg, int *n)
+ {
+ 	int size = ntohl(msg->size);
+@@ -335,31 +355,11 @@ static int tracecmd_msg_read_extra(int fd, struct tracecmd_msg *msg, int *n)
+ 		}
+ 		return 0;
+ 	case MSG_RINIT:
+-		rsize = MIN_RINIT_SIZE - *n;
+-		ret = msg_read(fd, msg, rsize, n);
+-		if (ret < 0)
+-			return ret;
+-		size -= *n;
+-		if (size < 0)
+-			return -ENOMSG;
+-		msg->data.rinit.port_array = malloc(size);
+-		if (!msg->data.rinit.port_array)
+-			return -ENOMEM;
+-		*n = 0;
+-		return msg_read(fd, msg->data.rinit.port_array, size, n);
++		return msg_read_extra(fd, msg, n, size, MIN_RINIT_SIZE,
++				      (void **)&msg->data.rinit.port_array);
+ 	case MSG_SENDMETA:
+-		rsize = MIN_META_SIZE - *n;
+-		ret = msg_read(fd, msg, rsize, n);
+-		if (ret < 0)
+-			return ret;
+-		size -= *n;
+-		if (size < 0)
+-			return -ENOMSG;
+-		msg->data.meta.buf = malloc(size);
+-		if (!msg->data.meta.buf)
+-			return -ENOMEM;
+-		*n = 0;
+-		return msg_read(fd, msg->data.meta.buf, size, n);
++		return msg_read_extra(fd, msg, n, size, MIN_META_SIZE,
++				      (void **)&msg->data.meta.buf);
+ 	}
+ 
+ 	return msg_read(fd, msg, size - MSG_HDR_LEN, n);
+-- 
+2.5.5
+

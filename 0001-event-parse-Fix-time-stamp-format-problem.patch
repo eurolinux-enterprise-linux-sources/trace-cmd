@@ -1,0 +1,33 @@
+From e5e453917f247faa7d37728d59001759e7005258 Mon Sep 17 00:00:00 2001
+From: "Chaos.Chen" <rainboy1215@gmail.com>
+Date: Fri, 11 Sep 2015 18:22:00 -0700
+Subject: [PATCH 001/134] event-parse: Fix time stamp format problem
+
+Sometimes we may see 1234.1000000 if time resolution in usec
+Just fixing it from 1234.1000000 to 1235.000000
+
+Signed-off-by: Chaos.Chen <rainboy1215@gmail.com>
+Signed-off-by: Steven Rostedt <rostedt@goodmis.org>
+---
+ event-parse.c | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/event-parse.c b/event-parse.c
+index e318601f09fe..923d2155226b 100644
+--- a/event-parse.c
++++ b/event-parse.c
+@@ -5241,6 +5241,11 @@ void pevent_print_event(struct pevent *pevent, struct trace_seq *s,
+ 			p = 9;
+ 		} else {
+ 			usecs = (nsecs + 500) / NSECS_PER_USEC;
++			/* To avoid usecs larger than 1 sec */
++			if (usecs >= 1000000) {
++				usecs -= 1000000;
++				secs--;
++			}
+ 			p = 6;
+ 		}
+ 
+-- 
+2.5.5
+

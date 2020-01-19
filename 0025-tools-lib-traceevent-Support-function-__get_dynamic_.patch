@@ -1,0 +1,142 @@
+From df322bf9ad980f4365ce2f7544b632814c0d66af Mon Sep 17 00:00:00 2001
+From: He Kuang <hekuang@huawei.com>
+Date: Sat, 29 Aug 2015 04:22:05 +0000
+Subject: [PATCH 025/134] tools lib traceevent: Support function
+ __get_dynamic_array_len
+
+Support helper function __get_dynamic_array_len() in libtraceevent, this
+function is used accompany with __print_array() or __print_hex(), but
+currently it is not an available function in the function list of
+process_function().
+
+The total allocated length of the dynamic array is embedded in the top
+half of __data_loc_##item field. This patch adds new arg type
+PRINT_DYNAMIC_ARRAY_LEN to return the length to eval_num_arg(),
+
+Signed-off-by: He Kuang <hekuang@huawei.com>
+Acked-by: Namhyung Kim <namhyung@kernel.org>
+Cc: Alexei Starovoitov <ast@plumgrid.com>
+Cc: Jiri Olsa <jolsa@kernel.org>
+Cc: Masami Hiramatsu <masami.hiramatsu.pt@hitachi.com>
+Cc: Peter Zijlstra <a.p.zijlstra@chello.nl>
+Cc: Wang Nan <wangnan0@huawei.com>
+Cc: Zefan Li <lizefan@huawei.com>
+Cc: pi3orama@163.com
+Link: http://lkml.kernel.org/r/1440822125-52691-32-git-send-email-wangnan0@huawei.com
+Signed-off-by: Wang Nan <wangnan0@huawei.com>
+Signed-off-by: Arnaldo Carvalho de Melo <acme@redhat.com>
+Signed-off-by: Steven Rostedt <rostedt@goodmis.org>
+---
+ event-parse.c | 56 ++++++++++++++++++++++++++++++++++++++++++++++++++++++--
+ event-parse.h |  1 +
+ 2 files changed, 55 insertions(+), 2 deletions(-)
+
+diff --git a/event-parse.c b/event-parse.c
+index 14d6d7bbe0e9..fa4a3f561126 100644
+--- a/event-parse.c
++++ b/event-parse.c
+@@ -848,6 +848,7 @@ static void free_arg(struct print_arg *arg)
+ 		free(arg->bitmask.bitmask);
+ 		break;
+ 	case PRINT_DYNAMIC_ARRAY:
++	case PRINT_DYNAMIC_ARRAY_LEN:
+ 		free(arg->dynarray.index);
+ 		break;
+ 	case PRINT_OP:
+@@ -2723,6 +2724,42 @@ process_dynamic_array(struct event_format *event, struct print_arg *arg, char **
+ }
+ 
+ static enum event_type
++process_dynamic_array_len(struct event_format *event, struct print_arg *arg,
++			  char **tok)
++{
++	struct format_field *field;
++	enum event_type type;
++	char *token;
++
++	if (read_expect_type(EVENT_ITEM, &token) < 0)
++		goto out_free;
++
++	arg->type = PRINT_DYNAMIC_ARRAY_LEN;
++
++	/* Find the field */
++	field = pevent_find_field(event, token);
++	if (!field)
++		goto out_free;
++
++	arg->dynarray.field = field;
++	arg->dynarray.index = 0;
++
++	if (read_expected(EVENT_DELIM, ")") < 0)
++		goto out_err;
++
++	type = read_token(&token);
++	*tok = token;
++
++	return type;
++
++ out_free:
++	free_token(token);
++ out_err:
++	*tok = NULL;
++	return EVENT_ERROR;
++}
++
++static enum event_type
+ process_paren(struct event_format *event, struct print_arg *arg, char **tok)
+ {
+ 	struct print_arg *item_arg;
+@@ -2969,6 +3006,10 @@ process_function(struct event_format *event, struct print_arg *arg,
+ 		free_token(token);
+ 		return process_dynamic_array(event, arg, tok);
+ 	}
++	if (strcmp(token, "__get_dynamic_array_len") == 0) {
++		free_token(token);
++		return process_dynamic_array_len(event, arg, tok);
++	}
+ 
+ 	func = find_func_handler(event->pevent, token);
+ 	if (func) {
+@@ -3649,14 +3690,25 @@ eval_num_arg(void *data, int size, struct event_format *event, struct print_arg
+ 			goto out_warning_op;
+ 		}
+ 		break;
++	case PRINT_DYNAMIC_ARRAY_LEN:
++		offset = pevent_read_number(pevent,
++					    data + arg->dynarray.field->offset,
++					    arg->dynarray.field->size);
++		/*
++		 * The total allocated length of the dynamic array is
++		 * stored in the top half of the field, and the offset
++		 * is in the bottom half of the 32 bit field.
++		 */
++		val = (unsigned long long)(offset >> 16);
++		break;
+ 	case PRINT_DYNAMIC_ARRAY:
+ 		/* Without [], we pass the address to the dynamic data */
+ 		offset = pevent_read_number(pevent,
+ 					    data + arg->dynarray.field->offset,
+ 					    arg->dynarray.field->size);
+ 		/*
+-		 * The actual length of the dynamic array is stored
+-		 * in the top half of the field, and the offset
++		 * The total allocated length of the dynamic array is
++		 * stored in the top half of the field, and the offset
+ 		 * is in the bottom half of the 32 bit field.
+ 		 */
+ 		offset &= 0xffff;
+diff --git a/event-parse.h b/event-parse.h
+index 72639d5d7539..d99bdf07bbdf 100644
+--- a/event-parse.h
++++ b/event-parse.h
+@@ -296,6 +296,7 @@ enum print_arg_type {
+ 	PRINT_OP,
+ 	PRINT_FUNC,
+ 	PRINT_BITMASK,
++	PRINT_DYNAMIC_ARRAY_LEN,
+ };
+ 
+ struct print_arg {
+-- 
+2.5.5
+

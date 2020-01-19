@@ -1,0 +1,127 @@
+From 307bdda7716074b67f074982130c1e4d4ae05d05 Mon Sep 17 00:00:00 2001
+From: "Steven Rostedt (Red Hat)" <rostedt@goodmis.org>
+Date: Mon, 14 Sep 2015 17:44:12 -0400
+Subject: [PATCH 069/134] trace-cmd: Add debug option to tell msg protocol not
+ to timeout
+
+In order to debug the message protocol, we do not want to time out, as we
+need to run gdb on the client and server, and timeouts kill the connections
+we want to debug.
+
+Signed-off-by: Steven Rostedt <rostedt@goodmis.org>
+---
+ trace-cmd.h    |  3 +++
+ trace-listen.c |  3 +++
+ trace-msg.c    | 11 ++++++++++-
+ trace-record.c | 10 ++++++++++
+ 4 files changed, 26 insertions(+), 1 deletion(-)
+
+diff --git a/trace-cmd.h b/trace-cmd.h
+index 451771a88cf0..cef2458a3a03 100644
+--- a/trace-cmd.h
++++ b/trace-cmd.h
+@@ -285,6 +285,9 @@ int tracecmd_msg_initial_setting(int fd, int *cpus, int *pagesize);
+ int tracecmd_msg_send_port_array(int fd, int total_cpus, int *ports);
+ int tracecmd_msg_collect_metadata(int ifd, int ofd);
+ 
++/* msg debugging */
++void tracecmd_msg_set_debug(int debug);
++
+ /* --- Plugin handling --- */
+ extern struct pevent_plugin_option trace_ftrace_options[];
+ 
+diff --git a/trace-listen.c b/trace-listen.c
+index 16375f8281ff..420b68d4ed24 100644
+--- a/trace-listen.c
++++ b/trace-listen.c
+@@ -936,6 +936,9 @@ void trace_listen(int argc, char **argv)
+ 	signal_setup(SIGINT, finish);
+ 	signal_setup(SIGTERM, finish);
+ 
++	if (debug)
++		tracecmd_msg_set_debug(debug);
++
+ 	do_listen(port);
+ 
+ 	return;
+diff --git a/trace-msg.c b/trace-msg.c
+index cacdc1c912fb..98c330aa8817 100644
+--- a/trace-msg.c
++++ b/trace-msg.c
+@@ -411,6 +411,15 @@ error:
+ }
+ 
+ #define MSG_WAIT_MSEC	5000
++static int msg_wait_to = MSG_WAIT_MSEC;
++
++void tracecmd_msg_set_debug(int debug)
++{
++	if (debug)
++		msg_wait_to = -1;
++	else
++		msg_wait_to = MSG_WAIT_MSEC;
++}
+ 
+ /*
+  * A return value of 0 indicates time-out
+@@ -422,7 +431,7 @@ static int tracecmd_msg_recv_wait(int fd, struct tracecmd_msg *msg)
+ 
+ 	pfd.fd = fd;
+ 	pfd.events = POLLIN;
+-	ret = poll(&pfd, 1, MSG_WAIT_MSEC);
++	ret = poll(&pfd, 1, msg_wait_to);
+ 	if (ret < 0)
+ 		return -errno;
+ 	else if (ret == 0)
+diff --git a/trace-record.c b/trace-record.c
+index 4706f90eee91..e4839943e8b1 100644
+--- a/trace-record.c
++++ b/trace-record.c
+@@ -4103,6 +4103,7 @@ void update_first_instance(struct buffer_instance *instance, int topt)
+ }
+ 
+ enum {
++	OPT_debug	= 247,
+ 	OPT_tsoffset	= 249,
+ 	OPT_bycomm	= 250,
+ 	OPT_stderr	= 251,
+@@ -4142,6 +4143,7 @@ void trace_record (int argc, char **argv)
+ 	int topt = 0;
+ 	int do_child = 0;
+ 	int data_flags = 0;
++	int debug = 0;
+ 
+ 	int c;
+ 
+@@ -4309,6 +4311,7 @@ void trace_record (int argc, char **argv)
+ 			{"stderr", no_argument, NULL, OPT_stderr},
+ 			{"by-comm", no_argument, NULL, OPT_bycomm},
+ 			{"ts-offset", required_argument, NULL, OPT_tsoffset},
++			{"debug", no_argument, NULL, OPT_debug},
+ 			{"help", no_argument, NULL, '?'},
+ 			{NULL, 0, NULL, 0}
+ 		};
+@@ -4571,6 +4574,9 @@ void trace_record (int argc, char **argv)
+ 				die("Can not use both --date and --ts-offset");
+ 			data_flags |= DATA_FL_OFFSET;
+ 			break;
++		case OPT_debug:
++			debug = 1;
++			break;
+ 		default:
+ 			usage(argv);
+ 		}
+@@ -4598,6 +4604,10 @@ void trace_record (int argc, char **argv)
+ 	if (profile && !buffer_instances)
+ 		top_instance.profile = 1;
+ 
++	/* Let msg protocol know if we are debugging */
++	if (debug)
++		tracecmd_msg_set_debug(debug);
++
+ 	/*
+ 	 * If top_instance doesn't have any plugins or events, then
+ 	 * remove it from being processed.
+-- 
+2.5.5
+

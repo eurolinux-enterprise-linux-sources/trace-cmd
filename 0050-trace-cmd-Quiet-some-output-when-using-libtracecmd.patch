@@ -1,0 +1,53 @@
+From 91d45fa0b2e66b8c05f3d393ee5c0ea99c377dbc Mon Sep 17 00:00:00 2001
+From: Josef Bacik <jbacik@fb.com>
+Date: Fri, 4 Dec 2015 10:37:30 -0500
+Subject: [PATCH 050/134] trace-cmd: Quiet some output when using libtracecmd
+
+If you link against libtracecmd you get a few extraneous warnings and printf's
+that aren't related to your tool.  So by default make the path to the events you
+are tracing use pr_stat() so if it's not defined we don't get the output, and
+make the weak warning() do nothing by default.  The trace-cmd stuff has this
+defined so it'll continue to work normally, it just won't be noisy for consumers
+of libtracecmd.
+
+Link: http://lkml.kernel.org/r/1449243450-4280-1-git-send-email-jbacik@fb.com
+
+Signed-off-by: Josef Bacik <jbacik@fb.com>
+Signed-off-by: Steven Rostedt <rostedt@goodmis.org>
+---
+ parse-utils.c  | 5 -----
+ trace-record.c | 2 +-
+ 2 files changed, 1 insertion(+), 6 deletions(-)
+
+diff --git a/parse-utils.c b/parse-utils.c
+index f023a133abb6..90693915a7a8 100644
+--- a/parse-utils.c
++++ b/parse-utils.c
+@@ -63,11 +63,6 @@ void __warning(const char *fmt, ...)
+ 
+ void __weak warning(const char *fmt, ...)
+ {
+-	va_list ap;
+-
+-	va_start(ap, fmt);
+-	__vwarning(fmt, ap);
+-	va_end(ap);
+ }
+ 
+ void __vpr_stat(const char *fmt, va_list ap)
+diff --git a/trace-record.c b/trace-record.c
+index ea47848a3735..32749dfd9c9a 100644
+--- a/trace-record.c
++++ b/trace-record.c
+@@ -2278,7 +2278,7 @@ static int expand_event_files(struct buffer_instance *instance,
+ 		path = globbuf.gl_pathv[i];
+ 
+ 		event = create_event(instance, path, old_event);
+-		printf("%s\n", path);
++		pr_stat("%s\n", path);
+ 
+ 		len = strlen(path);
+ 
+-- 
+2.5.5
+

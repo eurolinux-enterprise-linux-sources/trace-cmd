@@ -1,0 +1,34 @@
+From e0a5f0a59d0f4fe26cbfd3a05f8f45baab7cec3a Mon Sep 17 00:00:00 2001
+From: "Steven Rostedt (VMware)" <rostedt@goodmis.org>
+Date: Thu, 16 Feb 2017 11:50:38 -0500
+Subject: [PATCH 122/134] trace-cmd: Do not initialize profiler if it isn't
+ being used
+
+The profiler requires scheduler tracepoints enabled, and will bug out if
+they are not. The profiler initialization will error without these
+tracepoints defined. There's no reason to initialize the profiler on reading
+a trace.dat file especially since it could cause that reading to fail if the
+profiler required tracepoints are not there.
+
+Signed-off-by: Steven Rostedt (VMware) <rostedt@goodmis.org>
+---
+ trace-read.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/trace-read.c b/trace-read.c
+index 48a603ca0d2a..c8a5b59d88aa 100644
+--- a/trace-read.c
++++ b/trace-read.c
+@@ -1177,7 +1177,8 @@ static void read_data_info(struct list_head *handle_list, enum output_type otype
+ 			last_hook->next = tracecmd_hooks(handles->handle);
+ 		else
+ 			hooks = tracecmd_hooks(handles->handle);
+-		trace_init_profile(handles->handle, hooks, global);
++		if (profile)
++			trace_init_profile(handles->handle, hooks, global);
+ 
+ 		process_filters(handles);
+ 
+-- 
+2.5.5
+

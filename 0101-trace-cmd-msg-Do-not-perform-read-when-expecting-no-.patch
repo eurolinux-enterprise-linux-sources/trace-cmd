@@ -1,0 +1,38 @@
+From 0e338e79b08567669c0f1da0e7cdd779b164f39d Mon Sep 17 00:00:00 2001
+From: "Steven Rostedt (Red Hat)" <rostedt@goodmis.org>
+Date: Thu, 15 Sep 2016 15:28:36 -0400
+Subject: [PATCH 101/134] trace-cmd msg: Do not perform read when expecting no
+ data
+
+If the size of a read is zero, do not perform the read.
+
+Signed-off-by: Steven Rostedt <rostedt@goodmis.org>
+---
+ trace-msg.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/trace-msg.c b/trace-msg.c
+index 62a9c194df9e..e53c073efbab 100644
+--- a/trace-msg.c
++++ b/trace-msg.c
+@@ -294,7 +294,7 @@ static int msg_read(int fd, void *buf, u32 size, int *n)
+ {
+ 	int r;
+ 
+-	do {
++	while (size) {
+ 		r = read(fd, buf + *n, size);
+ 		if (r < 0) {
+ 			if (errno == EINTR)
+@@ -304,7 +304,7 @@ static int msg_read(int fd, void *buf, u32 size, int *n)
+ 			return -ENOTCONN;
+ 		size -= r;
+ 		*n += r;
+-	} while (size);
++	}
+ 
+ 	return 0;
+ }
+-- 
+2.5.5
+

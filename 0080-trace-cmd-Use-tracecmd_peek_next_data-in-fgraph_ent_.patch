@@ -1,0 +1,104 @@
+From 64bea4bc31b27f088e38a9f941a0e93c77d5bb18 Mon Sep 17 00:00:00 2001
+From: Namhyung Kim <namhyung@gmail.com>
+Date: Fri, 8 Jul 2016 14:56:12 +0900
+Subject: [PATCH 080/134] trace-cmd: Use tracecmd_peek_next_data() in
+ fgraph_ent_handler
+
+When a task was migrated to other cpu in the middle of a function, the
+fgraph_exit record will be in a different cpu than the enter record.
+But currently fgraph_ent_handler() only peeks at the same cpu so it
+could read an incorrect record.
+
+For example, please see following raw records:
+
+  bash-10478 [007]    73.454273: funcgraph_entry:   func=0xffffffff8123bf90 depth=0
+  bash-10478 [000]    73.454650: funcgraph_exit:    func=0xffffffff8123bf90 calltime=0x111a37483c rettime=0x111a3d0285 overrun=0x0 depth=0
+  bash-10478 [000]    74.456383: funcgraph_entry:   func=0xffffffff8123bf90 depth=0
+  bash-10478 [000]    74.456655: funcgraph_exit:    func=0xffffffff8123bf90 calltime=0x1155f24337 rettime=0x1155f66559 overrun=0x0 depth=0
+  bash-10478 [000]    75.458517: funcgraph_entry:   func=0xffffffff8123bf90 depth=0
+  bash-10478 [001]    75.458849: funcgraph_exit:    func=0xffffffff8123bf90 calltime=0x1191ad9de0 rettime=0x1191b2a6aa overrun=0x0 depth=0
+  bash-10478 [001]    76.460482: funcgraph_entry:   func=0xffffffff8123bf90 depth=0
+  bash-10478 [000]    76.460679: funcgraph_exit:    func=0xffffffff8123bf90 calltime=0x11cd6662b4 rettime=0x11cd695e03 overrun=0x0 depth=0
+  bash-10478 [000]    77.462334: funcgraph_entry:   func=0xffffffff8123bf90 depth=0
+  bash-10478 [004]    77.462564: funcgraph_exit:    func=0xffffffff8123bf90 calltime=0x12091d71c4 rettime=0x120920e977 overrun=0x0 depth=0
+  bash-10478 [004]    78.464315: funcgraph_entry:   func=0xffffffff8123bf90 depth=0
+  bash-10478 [001]    78.464644: funcgraph_exit:    func=0xffffffff8123bf90 calltime=0x1244d674de rettime=0x1244db7329 overrun=0x0 depth=0
+  bash-10478 [001]    79.466018: funcgraph_entry:   func=0xffffffff8123bf90 depth=0
+  bash-10478 [004]    79.466326: funcgraph_exit:    func=0xffffffff8123bf90 calltime=0x12808b3940 rettime=0x12808fe819 overrun=0x0 depth=0
+  bash-10478 [004]    80.468005: funcgraph_entry:   func=0xffffffff8123bf90 depth=0
+  bash-10478 [002]    80.468291: funcgraph_exit:    func=0xffffffff8123bf90 calltime=0x12bc44551f rettime=0x12bc48ac9a overrun=0x0 depth=0
+  bash-10478 [002]    81.469718: funcgraph_entry:   func=0xffffffff8123bf90 depth=0
+  bash-10478 [007]    81.470088: funcgraph_exit:    func=0xffffffff8123bf90 calltime=0x12f7f945b8 rettime=0x12f7fee028 overrun=0x0 depth=0
+
+The first entry was call to cma_alloc function, it was on cpu 7 but the
+task was migrated to cpu 0 before returning from the function.
+Currently trace-cmd shows like below:
+
+  bash-10478 [007]    73.454273: funcgraph_entry:      ! 367.216 us |  cma_alloc();
+  bash-10478 [000]    73.454650: funcgraph_exit:       ! 375.369 us |  }
+  bash-10478 [000]    74.456383: funcgraph_entry:      ! 270.882 us |  cma_alloc();
+  bash-10478 [000]    75.458517: funcgraph_entry:      ! 195.407 us |  cma_alloc();
+  bash-10478 [001]    75.458849: funcgraph_exit:       ! 329.930 us |  }
+  bash-10478 [001]    76.460482: funcgraph_entry:      ! 327.243 us |  cma_alloc();
+  bash-10478 [000]    77.462334: funcgraph_entry:      ! 293.465 us |  cma_alloc();
+  bash-10478 [004]    77.462564: funcgraph_exit:       ! 227.251 us |  }
+  bash-10478 [004]    78.464315: funcgraph_entry:      ! 306.905 us |  cma_alloc();
+  bash-10478 [001]    79.466018: funcgraph_entry:      ! 303.196 us |  cma_alloc();
+  bash-10478 [004]    80.468005: funcgraph_entry:                   |  cma_alloc() {
+  bash-10478 [002]    80.468291: funcgraph_exit:       ! 284.539 us |  }
+  bash-10478 [002]    81.469718: funcgraph_entry:      ! 323.215 us |  cma_alloc();
+
+This is because the first funcgraph_entry on cpu 7 matched to the last
+funcgraph_exit on cpu 7.  And second funcgraph_exit on cpu 0 was shown
+alone.  We need to match record from all cpu rather than the same cpu.
+In this case, entry on cpu 7 should be paired with exit on cpu 0.
+
+With this patch, the output look like below:
+
+  bash-10478 [007]    73.454273: funcgraph_entry:      ! 375.369 us |  cma_alloc();
+  bash-10478 [000]    74.456383: funcgraph_entry:      ! 270.882 us |  cma_alloc();
+  bash-10478 [000]    75.458517: funcgraph_entry:      ! 329.930 us |  cma_alloc();
+  bash-10478 [001]    76.460482: funcgraph_entry:      ! 195.407 us |  cma_alloc();
+  bash-10478 [000]    77.462334: funcgraph_entry:      ! 227.251 us |  cma_alloc();
+  bash-10478 [004]    78.464315: funcgraph_entry:      ! 327.243 us |  cma_alloc();
+  bash-10478 [001]    79.466018: funcgraph_entry:      ! 306.905 us |  cma_alloc();
+  bash-10478 [004]    80.468005: funcgraph_entry:      ! 284.539 us |  cma_alloc();
+  bash-10478 [002]    81.469718: funcgraph_entry:      ! 367.216 us |  cma_alloc();
+
+Maybe we can separate enter and exit if they happened on different
+cpu.  Anyway the time duration has correct value now.
+
+Link: http://lkml.kernel.org/r/20160708055612.32221-2-namhyung@gmail.com
+
+Reported-by: Joonsoo Kim <iamjoonsoo.kim@lge.com>
+Signed-off-by: Namhyung Kim <namhyung@kernel.org>
+Signed-off-by: Steven Rostedt <rostedt@goodmis.org>
+---
+ trace-ftrace.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/trace-ftrace.c b/trace-ftrace.c
+index 636b08b5cdef..edc9349aa28e 100644
+--- a/trace-ftrace.c
++++ b/trace-ftrace.c
+@@ -297,7 +297,7 @@ fgraph_ent_handler(struct trace_seq *s, struct pevent_record *record,
+ 	struct tracecmd_ftrace *finfo = context;
+ 	struct pevent_record *rec;
+ 	unsigned long long val, pid;
+-	int cpu = record->cpu;
++	int cpu;
+ 
+ 	ret_event_check(finfo, event->pevent);
+ 
+@@ -307,7 +307,7 @@ fgraph_ent_handler(struct trace_seq *s, struct pevent_record *record,
+ 	if (pevent_get_field_val(s, event, "func", record, &val, 1))
+ 		return trace_seq_putc(s, '!');
+ 
+-	rec = tracecmd_peek_data(tracecmd_curr_thread_handle, cpu);
++	rec = tracecmd_peek_next_data(tracecmd_curr_thread_handle, &cpu);
+ 	if (rec)
+ 		rec = get_return_for_leaf(s, cpu, pid, val, rec, finfo);
+ 
+-- 
+2.5.5
+

@@ -1,0 +1,31 @@
+From c3149d9b4cc399ab6ad4da953593c9a16b38ad72 Mon Sep 17 00:00:00 2001
+From: "Steven Rostedt (Red Hat)" <rostedt@goodmis.org>
+Date: Tue, 6 Sep 2016 17:41:56 -0400
+Subject: [PATCH 093/134] trace-cmd listen: Make sure plog() messages get to
+ console
+
+In case trace-cmd seg-faults right after plog(), plog() must be flush the
+message to its destination before it returns, otherwise, the message could
+be lost.
+
+Signed-off-by: Steven Rostedt <rostedt@goodmis.org>
+---
+ trace-listen.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/trace-listen.c b/trace-listen.c
+index db3a016ecc91..4bbda14ba22a 100644
+--- a/trace-listen.c
++++ b/trace-listen.c
+@@ -160,6 +160,8 @@ void plog(const char *fmt, ...)
+ 	va_start(ap, fmt);
+ 	__plog("", fmt, ap, stdout);
+ 	va_end(ap);
++	/* Make sure it gets to the screen, in case we crash afterward */
++	fflush(stdout);
+ }
+ 
+ static void make_pid_name(int mode, char *buf)
+-- 
+2.5.5
+

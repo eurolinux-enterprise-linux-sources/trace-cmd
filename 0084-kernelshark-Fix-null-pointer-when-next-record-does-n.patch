@@ -1,0 +1,34 @@
+From 013205a8f9e60998b39c106470957030585b5851 Mon Sep 17 00:00:00 2001
+From: "Steven Rostedt (Red Hat)" <rostedt@goodmis.org>
+Date: Mon, 3 Oct 2016 10:09:04 -0400
+Subject: [PATCH 084/134] kernelshark: Fix null pointer when next record does
+ not exist
+
+When testing if the plot is in irq context or not, it looks at the current
+record as well as the next record to see the context. Unfortunately, if the
+next record does not exist (null is returned) it would cause a crash.
+
+Signed-off-by: Steven Rostedt <rostedt@goodmis.org>
+---
+ trace-plot-task.c | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/trace-plot-task.c b/trace-plot-task.c
+index 4343a4c1d02f..5aa0af9696ce 100644
+--- a/trace-plot-task.c
++++ b/trace-plot-task.c
+@@ -527,7 +527,10 @@ static int task_plot_event(struct graph_info *ginfo,
+ 		/* It takes two events to be in an irq */
+ 		if (in_irq) {
+ 			next_record = tracecmd_peek_data(ginfo->handle, record->cpu);
+-			in_irq = record_is_interrupt(ginfo, next_record, FALSE);
++			if (next_record)
++				in_irq = record_is_interrupt(ginfo, next_record, FALSE);
++			else
++				in_irq = 0;
+ 		}
+ 
+ 		if (task_info->last_cpu != record->cpu) {
+-- 
+2.5.5
+

@@ -1,0 +1,33 @@
+From 7b09ce69dafb8e4f29d2a6b54db8a4a824a7445b Mon Sep 17 00:00:00 2001
+From: "Steven Rostedt (Red Hat)" <rostedt@goodmis.org>
+Date: Thu, 22 Sep 2016 17:35:56 -0400
+Subject: [PATCH 103/134] tracecmd list: Add --debug option
+
+Allow to debug list for agent reading.
+
+Signed-off-by: Steven Rostedt <rostedt@goodmis.org>
+---
+ trace-cmd.c | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/trace-cmd.c b/trace-cmd.c
+index bbb5b10d9fa5..e16338e34bbe 100644
+--- a/trace-cmd.c
++++ b/trace-cmd.c
+@@ -706,6 +706,13 @@ int main (int argc, char **argv)
+ 					funcre = arg;
+ 					show_all = 0;
+ 					break;
++				case '-':
++					if (strcmp(argv[i], "--debug") == 0) {
++						debug = true;
++						break;
++					}
++					fprintf(stderr, "list: invalid option -- '%s'\n",
++						argv[i]);
+ 				default:
+ 					fprintf(stderr, "list: invalid option -- '%c'\n",
+ 						argv[optind][1]);
+-- 
+2.5.5
+

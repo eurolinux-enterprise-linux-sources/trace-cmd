@@ -1,0 +1,64 @@
+From 6f79497e85dd7924365633b479b00ad1116a03d5 Mon Sep 17 00:00:00 2001
+From: "Steven Rostedt (Red Hat)" <rostedt@goodmis.org>
+Date: Mon, 11 Jul 2016 13:00:56 -0400
+Subject: [PATCH 079/134] trace-cmd: Consolidate
+ tracecmd_{read,peak}_next_data()
+
+Now that there's a tracecmd_peak_next_data() that is a subset of the
+functionality of tracecmd_read_next_data(), have tracecmd_read_next_data()
+call tracecmd_peak_next_data() and remove the duplicate code.
+
+Signed-off-by: Steven Rostedt <rostedt@goodmis.org>
+---
+ trace-input.c | 31 +++++++------------------------
+ 1 file changed, 7 insertions(+), 24 deletions(-)
+
+diff --git a/trace-input.c b/trace-input.c
+index e8253288310e..894cc945c710 100644
+--- a/trace-input.c
++++ b/trace-input.c
+@@ -1756,34 +1756,17 @@ tracecmd_read_data(struct tracecmd_input *handle, int cpu)
+ struct pevent_record *
+ tracecmd_read_next_data(struct tracecmd_input *handle, int *rec_cpu)
+ {
+-	unsigned long long ts;
+ 	struct pevent_record *record;
+-	int first_record = 1;
+-	int next;
+-	int cpu;
+-
+-	if (rec_cpu)
+-		*rec_cpu = -1;
+-
+-	next = -1;
+-	ts = 0;
++	int next_cpu;
+ 
+-	for (cpu = 0; cpu < handle->cpus; cpu++) {
+-		record = tracecmd_peek_data(handle, cpu);
+-		if (record && (first_record || record->ts < ts)) {
+-			ts = record->ts;
+-			next = cpu;
+-			first_record = 0;
+-		}
+-	}
++	record = tracecmd_peek_next_data(handle, &next_cpu);
++	if (!record)
++		return NULL;
+ 
+-	if (next >= 0) {
+-		if (rec_cpu)
+-			*rec_cpu = next;
+-		return tracecmd_read_data(handle, next);
+-	}
++	if (rec_cpu)
++		*rec_cpu = next_cpu;
+ 
+-	return NULL;
++	return tracecmd_read_data(handle, next_cpu);
+ }
+ 
+ /**
+-- 
+2.5.5
+

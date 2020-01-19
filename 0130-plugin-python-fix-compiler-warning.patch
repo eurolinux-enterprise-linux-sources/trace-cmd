@@ -1,0 +1,59 @@
+From 3b43d0a77d7178b797d6ba38ca21b8286b647afd Mon Sep 17 00:00:00 2001
+From: Federico Vaga <federico.vaga@vaga.pv.it>
+Date: Sun, 23 Apr 2017 12:22:54 +0200
+Subject: [PATCH 130/134] plugin:python: fix compiler warning
+
+The function `load_plugin` is passed, as argument, to
+`trace_util_load_plugins()` but the prototype was not exactly the same.
+
+Link: http://lkml.kernel.org/r/20170423102258.21609-2-federico.vaga@vaga.pv.it
+
+Signed-off-by: Federico Vaga <federico.vaga@vaga.pv.it>
+Signed-off-by: Steven Rostedt (VMware) <rostedt@goodmis.org>
+---
+ plugin_python.c | 8 +++++---
+ 1 file changed, 5 insertions(+), 3 deletions(-)
+
+diff --git a/plugin_python.c b/plugin_python.c
+index da07d27d5ef3..d3da8b08e19c 100644
+--- a/plugin_python.c
++++ b/plugin_python.c
+@@ -20,7 +20,7 @@ static const char pyload[] =
+ "finally:\n"
+ "   file.close()\n";
+ 
+-static void load_plugin(struct pevent *pevent, const char *path,
++static int load_plugin(struct pevent *pevent, const char *path,
+ 			const char *name, void *data)
+ {
+ 	PyObject *globals = data;
+@@ -32,7 +32,7 @@ static void load_plugin(struct pevent *pevent, const char *path,
+ 	PyObject *res;
+ 
+ 	if (!full || !n)
+-		return;
++		return -ENOMEM;
+ 
+ 	strcpy(full, path);
+ 	strcat(full, "/");
+@@ -43,7 +43,7 @@ static void load_plugin(struct pevent *pevent, const char *path,
+ 
+ 	asprintf(&load, pyload, full, n);
+ 	if (!load)
+-		return;
++		return -ENOMEM;
+ 
+ 	res = PyRun_String(load, Py_file_input, globals, globals);
+ 	if (!res) {
+@@ -53,6 +53,8 @@ static void load_plugin(struct pevent *pevent, const char *path,
+ 		Py_DECREF(res);
+ 
+ 	free(load);
++
++	return 0;
+ }
+ 
+ int PEVENT_PLUGIN_LOADER(struct pevent *pevent)
+-- 
+2.5.5
+

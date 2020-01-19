@@ -1,0 +1,44 @@
+From 908a6e96a55b75d3b53e35ee1b05b301b7612c75 Mon Sep 17 00:00:00 2001
+From: John Kacur <jkacur@redhat.com>
+Date: Thu, 3 Dec 2015 23:29:05 +0100
+Subject: [PATCH 049/134] trace-cmd: Don't call free on tracing and path more
+ than once
+
+In version trace-cmd-stable-v2.2 it is possible to call free on
+tracing and path more than once.
+
+Ensure this only happens once by moving this block to after the call
+to out_free
+
+Link: http://lkml.kernel.org/r/alpine.LFD.2.20.1512032331580.20385@riemann
+
+Signed-off-by: John Kacur <jkacur@redhat.com>
+Signed-off-by: Steven Rostedt <rostedt@goodmis.org>
+---
+ trace-recorder.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/trace-recorder.c b/trace-recorder.c
+index 7e637d36a889..49b04ea411f3 100644
+--- a/trace-recorder.c
++++ b/trace-recorder.c
+@@ -167,14 +167,14 @@ tracecmd_create_buffer_recorder_fd2(int fd, int fd2, int cpu, unsigned flags,
+ 	if (recorder->trace_fd < 0)
+ 		goto out_free;
+ 
+-	free(path);
+-
+ 	if ((recorder->flags & TRACECMD_RECORD_NOSPLICE) == 0) {
+ 		ret = pipe(recorder->brass);
+ 		if (ret < 0)
+ 			goto out_free;
+ 	}
+ 
++	free(path);
++
+ 	return recorder;
+ 
+  out_free:
+-- 
+2.5.5
+

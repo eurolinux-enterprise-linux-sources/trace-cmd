@@ -1,0 +1,53 @@
+From 5cfe15f00db02dd55f76d8f578eac20422fe2238 Mon Sep 17 00:00:00 2001
+From: "Steven Rostedt (Red Hat)" <rostedt@goodmis.org>
+Date: Mon, 12 Sep 2016 15:03:58 -0400
+Subject: [PATCH 098/134] trace-cmd listen: Simplify adding of client_pids
+
+Now that we leave holes in the client_pids array, we can remove the complex
+logic around allocating client_pids in blocks. Just use realloc each time,
+as it only grows the array, and we never shrink it.
+
+Signed-off-by: Steven Rostedt <rostedt@goodmis.org>
+---
+ trace-listen.c | 18 ++++--------------
+ 1 file changed, 4 insertions(+), 14 deletions(-)
+
+diff --git a/trace-listen.c b/trace-listen.c
+index ee8639fc5e9c..1890b6dfcd57 100644
+--- a/trace-listen.c
++++ b/trace-listen.c
+@@ -742,8 +742,6 @@ static int do_connection(int cfd, struct sockaddr_storage *peer_addr,
+ static int *client_pids;
+ static int free_pids;
+ static int saved_pids;
+-static int size_pids;
+-#define PIDS_BLOCK 32
+ 
+ static void add_process(int pid)
+ {
+@@ -762,18 +760,10 @@ static void add_process(int pid)
+ 			warning("Could not find free pid");
+ 	}
+ 	if (!client) {
+-		if (!client_pids) {
+-			size_pids = PIDS_BLOCK;
+-			client_pids = malloc(sizeof(*client_pids) * size_pids);
+-			if (!client_pids)
+-				pdie("allocating pids");
+-		} else if (!(saved_pids % PIDS_BLOCK)) {
+-			size_pids += PIDS_BLOCK;
+-			client_pids = realloc(client_pids,
+-					      sizeof(*client_pids) * size_pids);
+-			if (!client_pids)
+-				pdie("realloc of pids");
+-		}
++		client_pids = realloc(client_pids,
++				      sizeof(*client_pids) * (saved_pids + 1));
++		if (!client_pids)
++			pdie("allocating pids");
+ 		client = &client_pids[saved_pids++];
+ 	}
+ 	*client = pid;
+-- 
+2.5.5
+

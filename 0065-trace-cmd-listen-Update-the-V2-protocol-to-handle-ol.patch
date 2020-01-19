@@ -1,0 +1,288 @@
+From cc042aba4a97aea452c7943a00d0147fcc5aa7ce Mon Sep 17 00:00:00 2001
+From: "Steven Rostedt (Red Hat)" <rostedt@goodmis.org>
+Date: Fri, 15 May 2015 12:15:53 -0400
+Subject: [PATCH 065/134] trace-cmd listen: Update the V2 protocol to handle
+ old and new
+
+Change the protocol slightly where V1 will fail right away without creating
+a blank trace.dat file by appending '-1' to the V2 name. The old trace-cmd
+listen will see that as a negative CPU count and bail.
+
+Also change the hand shake a bit such that if we go to a V3, a V2 server
+could just let the newer trace-cmd client know what version it can support.
+
+Here's the update:
+
+     <server>                 <client>
+      listen to socket fd
+                              connect to socket fd
+      accept the client
+      send "tracecmd"
+               +------------> receive "tracecmd"
+                              check "tracecmd"
+*                             send "-1V2\0"
+* try_again:
+*     receive "-1V2" <------------+
+*     check "-1V2"
+*     if (!"-1V2") {
+*       if (memcmp("-1V",3))
+*         error();
+*       send "V2\0"
+*       goto try_again;
+*     }
+*     send "V2"
+*           +---------------> receive "V2"
+*                             check "V2"
+*                             send "<MAGIC_NUMBER>\00" as the v2 protocol
+
+      read "<MAGIC_NUMBER>\00"
+*     send "OK"
+*           +---------------> receive "OK"
+*                             check "OK"
+                              send cpus,pagesize,option(MSG_TINIT)
+      receive MSG_TINIT <-------+
+      print "cpus=XXX"
+      print "pagesize=XXX"
+      understand option
+      send port_array
+               +--MSG_RINIT-> receive MSG_RINIT
+                              understand port_array
+                              send meta data(MSG_SENDMETA)
+      receive MSG_SENDMETA <----+
+      record meta data
+                         (snip)
+                              send a message to finish sending meta data
+                                |                           (MSG_FINMETA)
+      receive MSG_FINMETA <-----+
+      read block
+     --- start sending trace data on child processes ---
+
+     --- When client finishes sending trace data ---
+                              send MSG_CLOSE
+      receive MSG_CLOSE <-------+
+      close(socket fd)        close(socket fd)
+
+The '*' represents what was updated.
+
+Signed-off-by: Steven Rostedt <rostedt@goodmis.org>
+---
+ trace-listen.c | 75 +++++++++++++++++++++++++++++++++++++++++++---------------
+ trace-msg.h    |  1 +
+ trace-record.c | 18 ++++++++++----
+ 3 files changed, 71 insertions(+), 23 deletions(-)
+
+diff --git a/trace-listen.c b/trace-listen.c
+index 77df7c3d900d..16375f8281ff 100644
+--- a/trace-listen.c
++++ b/trace-listen.c
+@@ -317,15 +317,18 @@ static int open_udp(const char *node, const char *port, int *pid,
+ 
+ static int communicate_with_client(int fd, int *cpus, int *pagesize)
+ {
++	char *last_proto = NULL;
+ 	char buf[BUFSIZ];
+ 	char *option;
+ 	int options;
+ 	int size;
+ 	int n, s, t, i;
++	int ret = -EINVAL;
+ 
+ 	/* Let the client know what we are */
+ 	write(fd, "tracecmd", 8);
+ 
++ try_again:
+ 	/* read back the CPU count */
+ 	n = read_string(fd, buf, BUFSIZ);
+ 	if (n == BUFSIZ)
+@@ -335,41 +338,66 @@ static int communicate_with_client(int fd, int *cpus, int *pagesize)
+ 	*cpus = atoi(buf);
+ 
+ 	/* Is the client using the new protocol? */
+-	if (!*cpus) {
+-		if (memcmp(buf, "V2", 2) != 0) {
+-			plog("Cannot handle the protocol %s", buf);
+-			return -EINVAL;
++	if (*cpus == -1) {
++		if (memcmp(buf, V2_CPU, n) != 0) {
++			/* If it did not send a version, then bail */
++			if (memcmp(buf, "-1V", 3)) {
++				plog("Unknown string %s\n", buf);
++				goto out;
++			}
++			/* Skip "-1" */
++			plog("Cannot handle the protocol %s\n", buf+2);
++
++			/* If it returned the same command as last time, bail! */
++			if (last_proto && strncmp(last_proto, buf, n) == 0) {
++				plog("Repeat of version %s sent\n", last_proto);
++				goto out;
++			}
++			free(last_proto);
++			last_proto = malloc(n + 1);
++			if (last_proto) {
++				memcpy(last_proto, buf, n);
++				last_proto[n] = 0;
++			}
++			/* Return the highest protocol we can use */
++			write(fd, "V2", 3);
++			goto try_again;
+ 		}
+ 
+-		/* read the rest of dummy data, but not use */
+-		read(fd, buf, sizeof(V2_MAGIC)+1);
++		/* Let the client know we use v2 protocol */
++		write(fd, "V2", 3);
+ 
+-		proto_ver = V2_PROTOCOL;
++		/* read the rest of dummy data */
++		n = read(fd, buf, sizeof(V2_MAGIC));
++		if (memcmp(buf, V2_MAGIC, n) != 0)
++			goto out;
+ 
+-		/* Let the client know we use v2 protocol */
+-		write(fd, "V2", 2);
++		/* We're off! */
++		write(fd, "OK", 2);
++
++		proto_ver = V2_PROTOCOL;
+ 
+ 		/* read the CPU count, the page size, and options */
+ 		if (tracecmd_msg_initial_setting(fd, cpus, pagesize) < 0)
+-			return -EINVAL;
++			goto out;
+ 	} else {
+ 		/* The client is using the v1 protocol */
+ 
+ 		plog("cpus=%d\n", *cpus);
+ 		if (*cpus < 0)
+-			return -EINVAL;
++			goto out;
+ 
+ 		/* next read the page size */
+ 		n = read_string(fd, buf, BUFSIZ);
+ 		if (n == BUFSIZ)
+ 			/** ERROR **/
+-			return -EINVAL;
++			goto out;
+ 
+ 		*pagesize = atoi(buf);
+ 
+ 		plog("pagesize=%d\n", *pagesize);
+ 		if (*pagesize <= 0)
+-			return -EINVAL;
++			goto out;
+ 
+ 		/* Now the number of options */
+ 		n = read_string(fd, buf, BUFSIZ);
+@@ -384,20 +412,24 @@ static int communicate_with_client(int fd, int *cpus, int *pagesize)
+ 			n = read_string(fd, buf, BUFSIZ);
+ 			if (n == BUFSIZ)
+ 				/** ERROR **/
+-				return -EINVAL;
++				goto out;
+ 			size = atoi(buf);
+ 			/* prevent a client from killing us */
+ 			if (size > MAX_OPTION_SIZE)
+-				return -EINVAL;
++				goto out;
++
++			ret = -ENOMEM;
+ 			option = malloc(size);
+ 			if (!option)
+-				return -ENOMEM;
++				goto out;
++
++			ret = -EIO;
+ 			do {
+ 				t = size;
+ 				s = 0;
+ 				s = read(fd, option+s, t);
+ 				if (s <= 0)
+-					return -EIO;
++					goto out;
+ 				t -= s;
+ 				s = size - t;
+ 			} while (t);
+@@ -405,15 +437,20 @@ static int communicate_with_client(int fd, int *cpus, int *pagesize)
+ 			s = process_option(option);
+ 			free(option);
+ 			/* do we understand this option? */
++			ret = -EINVAL;
+ 			if (!s)
+-				return -EINVAL;
++				goto out;
+ 		}
+ 	}
+ 
+ 	if (use_tcp)
+ 		plog("Using TCP for live connection\n");
+ 
+-	return 0;
++	ret = 0;
++ out:
++	free(last_proto);
++
++	return ret;
+ }
+ 
+ static int create_client_file(const char *node, const char *port)
+diff --git a/trace-msg.h b/trace-msg.h
+index b23e72be5c1a..0cc972cadc55 100644
+--- a/trace-msg.h
++++ b/trace-msg.h
+@@ -5,6 +5,7 @@
+ 
+ #define UDP_MAX_PACKET	(65536 - 20)
+ #define V2_MAGIC	"677768\0"
++#define V2_CPU		"-1V2"
+ 
+ #define V1_PROTOCOL	1
+ #define V2_PROTOCOL	2
+diff --git a/trace-record.c b/trace-record.c
+index b6f58f914320..4706f90eee91 100644
+--- a/trace-record.c
++++ b/trace-record.c
+@@ -2699,6 +2699,7 @@ static void communicate_with_listener_v2(int fd)
+ static void check_protocol_version(int fd)
+ {
+ 	char buf[BUFSIZ];
++	int n;
+ 
+ 	check_first_msg_from_server(fd);
+ 
+@@ -2714,19 +2715,28 @@ static void check_protocol_version(int fd)
+ 	 * So, we add the dummy number (the magic number and 0 option) to the
+ 	 * first client message.
+ 	 */
+-	write(fd, "V2\0"V2_MAGIC"0", sizeof(V2_MAGIC)+4);
++	write(fd, V2_CPU, sizeof(V2_CPU));
+ 
+ 	/* read a reply message */
+-	read(fd, buf, BUFSIZ);
++	n = read(fd, buf, BUFSIZ);
+ 
+-	if (!buf[0]) {
++	if (n < 0 || !buf[0]) {
+ 		/* the server uses the v1 protocol, so we'll use it */
+ 		proto_ver = V1_PROTOCOL;
+ 		plog("Use the v1 protocol\n");
+ 	} else {
+-		if (memcmp(buf, "V2", 2) != 0)
++		if (memcmp(buf, "V2", n) != 0)
+ 			die("Cannot handle the protocol %s", buf);
+ 		/* OK, let's use v2 protocol */
++		write(fd, V2_MAGIC, sizeof(V2_MAGIC));
++
++		n = read(fd, buf, BUFSIZ - 1);
++		if (n != 2 || memcmp(buf, "OK", 2) != 0) {
++			if (n < 0)
++				n  = 0;
++			buf[n] = 0;
++			die("Cannot handle the protocol %s", buf);
++		}
+ 	}
+ }
+ 
+-- 
+2.5.5
+

@@ -1,0 +1,31 @@
+From 5ebd7cd9f25f29b0c5f2f6c3a05e6fcac184992e Mon Sep 17 00:00:00 2001
+From: Steven Rostedt <rostedt@goodmis.org>
+Date: Tue, 9 Feb 2016 22:38:34 -0500
+Subject: [PATCH 040/134] kernelshark: Filter out preempt from running sched
+ switch state
+
+The task state now includes a flag for when its preempted. This causes
+the task plot to not denote the task was preempted (rather ironic).
+Mask out the bits that are still allow us to see this is TASK_RUNNING.
+
+Signed-off-by: Steven Rostedt <rostedt@goodmis.org>
+---
+ trace-plot-task.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/trace-plot-task.c b/trace-plot-task.c
+index 78f409232b70..b6c6fadfe9ad 100644
+--- a/trace-plot-task.c
++++ b/trace-plot-task.c
+@@ -69,7 +69,7 @@ static gboolean is_running(struct graph_info *ginfo, struct pevent_record *recor
+ 		return FALSE;
+ 
+ 	pevent_read_number_field(ginfo->event_prev_state, record->data, &val);
+-	return val ? FALSE : TRUE;
++	return val & ((1 << 11) - 1)? FALSE : TRUE;
+ }
+ 
+ static gboolean record_matches_pid(struct graph_info *ginfo,
+-- 
+2.5.5
+
