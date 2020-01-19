@@ -18,11 +18,14 @@
  * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
  */
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <gtk/gtk.h>
+
+#include <sys/time.h>
 
 #include "trace-compat.h"
 #include "trace-cmd.h"
@@ -44,6 +47,8 @@
 #else
 # define dprintf(l, x...)	do { if (0) printf(x); } while (0)
 #endif
+
+#define TIME_DRAW	0
 
 #define MAX_WIDTH	10000
 
@@ -186,12 +191,21 @@ static void print_time(unsigned long long time)
 	printf("%lu.%06lu", sec, usec);
 }
 
+static int null_int_array[] = { -1 };
+
 static void init_event_cache(struct graph_info *ginfo)
 {
 	ginfo->ftrace_sched_switch_id = -1;
 	ginfo->event_sched_switch_id = -1;
 	ginfo->event_wakeup_id = -1;
 	ginfo->event_wakeup_new_id = -1;
+
+	ginfo->hard_irq_entry_ids = NULL;
+	ginfo->hard_irq_exit_ids = NULL;
+	ginfo->soft_irq_entry_ids = NULL;
+	ginfo->soft_irq_exit_ids = NULL;
+
+	ginfo->no_irqs = TRUE;
 
 	ginfo->event_pid_field = NULL;
 	ginfo->event_comm_field = NULL;
@@ -1140,6 +1154,107 @@ int trace_graph_check_sched_switch(struct graph_info *ginfo,
 	return ret;
 }
 
+static void enter_id(gint **ids, gint id, gint *len)
+{
+	*ids = realloc(*ids, sizeof(gint) * (*len + 2));
+	(*ids)[*len] = id;
+	(*len)++;
+	(*ids)[*len] = -1;
+}
+
+enum graph_irq_type
+trace_graph_check_irq(struct graph_info *ginfo,
+		      struct pevent_record *record)
+{
+	struct event_format *event;
+	struct event_format **events;
+	gint id;
+	int i;
+
+	if (!ginfo->hard_irq_entry_ids) {
+		gint hard_irq_entry_len = 0;
+		gint hard_irq_exit_len = 0;
+		gint soft_irq_entry_len = 0;
+		gint soft_irq_exit_len = 0;
+
+		event = pevent_find_event_by_name(ginfo->pevent,
+						  NULL, "irq_handler_exit");
+		if (event)
+			enter_id(&ginfo->hard_irq_exit_ids, event->id,
+				 &hard_irq_exit_len);
+		else
+			ginfo->hard_irq_exit_ids = null_int_array;
+
+		event = pevent_find_event_by_name(ginfo->pevent,
+						  NULL, "irq_handler_entry");
+		if (event)
+			enter_id(&ginfo->hard_irq_entry_ids, event->id,
+				 &hard_irq_entry_len);
+		else
+			ginfo->hard_irq_entry_ids = null_int_array;
+
+		event = pevent_find_event_by_name(ginfo->pevent,
+						  NULL, "softirq_exit");
+		if (event)
+			enter_id(&ginfo->soft_irq_exit_ids, event->id,
+				 &soft_irq_exit_len);
+		else
+			ginfo->soft_irq_exit_ids = null_int_array;
+
+		event = pevent_find_event_by_name(ginfo->pevent,
+						  NULL, "softirq_entry");
+		if (event)
+			enter_id(&ginfo->soft_irq_entry_ids, event->id,
+				 &soft_irq_entry_len);
+		else
+			ginfo->soft_irq_entry_ids = null_int_array;
+
+		events = pevent_list_events(ginfo->pevent, EVENT_SORT_SYSTEM);
+
+		for (i = 0; events[i]; i++) {
+			event = events[i];
+			if (strcmp(event->system, "irq_vectors") == 0) {
+				ginfo->no_irqs = FALSE;
+				break;
+			}
+		}
+
+		for (; events[i]; i++) {
+			event = events[i];
+			if (strcmp(event->system, "irq_vectors") != 0)
+				break;
+			if (strcmp(event->name + strlen(event->name) - 5,
+				   "_exit") == 0)
+				enter_id(&ginfo->hard_irq_exit_ids, event->id,
+					 &hard_irq_exit_len);
+			else if (strcmp(event->name + strlen(event->name) - 6,
+					"_entry") == 0)
+				enter_id(&ginfo->hard_irq_entry_ids, event->id,
+					 &hard_irq_entry_len);
+		}
+	}
+
+	id = pevent_data_type(ginfo->pevent, record);
+
+	for (i = 0; ginfo->hard_irq_exit_ids[i] != -1; i++)
+		if (id == ginfo->hard_irq_exit_ids[i])
+			return GRAPH_HARDIRQ_EXIT;
+
+	for (i = 0; ginfo->hard_irq_entry_ids[i] != -1; i++)
+		if (id == ginfo->hard_irq_entry_ids[i])
+			return GRAPH_HARDIRQ_ENTRY;
+
+	for (i = 0; ginfo->soft_irq_exit_ids[i] != -1; i++)
+		if (id == ginfo->soft_irq_exit_ids[i])
+			return GRAPH_SOFTIRQ_EXIT;
+
+	for (i = 0; ginfo->soft_irq_entry_ids[i] != -1; i++)
+		if (id == ginfo->soft_irq_entry_ids[i])
+			return GRAPH_SOFTIRQ_ENTRY;
+
+	return GRAPH_IRQ_NONE;
+}
+
 static void draw_info_box(struct graph_info *ginfo, const gchar *buffer,
 			  gint x, gint y)
 {
@@ -1213,15 +1328,12 @@ static void draw_info_box(struct graph_info *ginfo, const gchar *buffer,
 static void draw_plot_info(struct graph_info *ginfo, struct graph_plot *plot,
 			   gint x, gint y)
 {
-	struct pevent *pevent;
-	guint64 time;
 	unsigned long sec, usec;
 	struct trace_seq s;
+	guint64 time;
 
 	time =  convert_x_to_time(ginfo, x);
 	convert_nano(time, &sec, &usec);
-
-	pevent = ginfo->pevent;
 
 	trace_seq_init(&s);
 
@@ -1243,7 +1355,6 @@ static void draw_plot_info(struct graph_info *ginfo, struct graph_plot *plot,
 
 static void draw_latency(struct graph_info *ginfo, gint x, gint y)
 {
-	struct pevent *pevent;
 	unsigned long sec, usec;
 	struct trace_seq s;
 	gboolean neg;
@@ -1261,8 +1372,6 @@ static void draw_latency(struct graph_info *ginfo, gint x, gint y)
 		neg = FALSE;
 
 	convert_nano(time, &sec, &usec);
-
-	pevent = ginfo->pevent;
 
 	trace_seq_init(&s);
 	trace_seq_printf(&s, "Diff: %s%ld.%06lu secs", neg ? "-":"", sec, usec);
@@ -1311,7 +1420,7 @@ static int update_graph(struct graph_info *ginfo, gdouble percent)
 	ginfo->start_x = (ginfo->view_start_time - ginfo->start_time) *
 		ginfo->resolution;
 
-	dprintf(1, "new resolution = %f\n", resolution);
+	dprintf(1, "new resolution = %.16f\n", resolution);
 	return 0;
 }
 
@@ -1726,16 +1835,9 @@ static gint draw_plot_line(struct graph_info *ginfo, int i,
 }
 
 static void draw_plot_box(struct graph_info *ginfo, int i,
-			  unsigned long long start,
-			  unsigned long long end,
+			  gint x1, gint x2,
 			  gboolean fill, GdkGC *gc)
 {
-	gint x1;
-	gint x2;
-
-	x1 = convert_time_to_x(ginfo, start);
-	x2 = convert_time_to_x(ginfo, end);
-
 	gdk_draw_rectangle(ginfo->curr_pixmap, gc,
 			   fill,
 			   x1, PLOT_BOX_TOP(i),
@@ -1748,8 +1850,11 @@ static void draw_plot(struct graph_info *ginfo, struct graph_plot *plot,
 	static PangoFontDescription *font;
 	PangoLayout *layout;
 	static gint width_16;
-	struct plot_info info;
-	gint x;
+	struct plot_info *info;
+	gboolean skip_box = FALSE;
+	gboolean skip_line = FALSE;
+	gint x = 0;
+	gint x2;
 
 	/* Calculate the size of 16 characters */
 	if (!width_16) {
@@ -1766,25 +1871,46 @@ static void draw_plot(struct graph_info *ginfo, struct graph_plot *plot,
 		g_object_unref(layout);
 	}
 
-	trace_graph_plot_event(ginfo, plot, record, &info);
+	trace_graph_plot_event(ginfo, plot, record);
+	info = &plot->info;
 
-	if (info.box) {
-		if (info.bcolor != plot->last_color) {
-			plot->last_color = info.bcolor;
-			set_color(ginfo->draw, plot->gc, plot->last_color);
-		}
-
-		draw_plot_box(ginfo, plot->pos, info.bstart, info.bend,
-			      info.bfill, plot->gc);
+	if (info->box) {
+		x = convert_time_to_x(ginfo, info->bstart);
+		x2 = convert_time_to_x(ginfo, info->bend);
+		skip_box = (x == x2 && x == info->last_box_x);
+		if (!skip_box && x == info->last_box_x)
+			x++;
+		info->last_box_x = x2;
+		skip_box = 0;
+		if (skip_box)
+			plot->last_color = -1;
 	}
 
-	if (info.line) {
-		if (info.lcolor != plot->last_color) {
-			plot->last_color = info.lcolor;
+	if (info->box && !skip_box) {
+		if (info->bcolor != plot->last_color) {
+			plot->last_color = info->bcolor;
 			set_color(ginfo->draw, plot->gc, plot->last_color);
 		}
 
-		x = draw_plot_line(ginfo, plot->pos, info.ltime, plot->gc);
+		draw_plot_box(ginfo, plot->pos, x, x2, info->bfill, plot->gc);
+	}
+
+	if (info->line) {
+		x = convert_time_to_x(ginfo, info->ltime);
+		skip_line = x == info->last_line_x;
+		info->last_line_x = x;
+		if (skip_line)
+			plot->last_color = -1;
+	}
+
+	if (info->line && !skip_line) {
+
+		if (info->lcolor != plot->last_color) {
+			plot->last_color = info->lcolor;
+			set_color(ginfo->draw, plot->gc, plot->last_color);
+		}
+
+		x = draw_plot_line(ginfo, plot->pos, info->ltime, plot->gc);
 
 		/* Figure out if we can show the text for the previous record */
 
@@ -1803,13 +1929,14 @@ static void draw_plot(struct graph_info *ginfo, struct graph_plot *plot,
 		plot->p2 = plot->p3;
 	}
 
-	if (!record && plot->p2)
+	if (!skip_line && !skip_box && !record && plot->p2)
 		draw_event_label(ginfo, plot->pos,
 				 plot->p1, plot->p2, ginfo->draw_width, width_16, font);
 }
 
 static void draw_plots(struct graph_info *ginfo, gint new_width)
 {
+	struct timeval tv_start, tv_stop;
 	struct plot_list *list;
 	struct graph_plot *plot;
 	struct pevent_record *record;
@@ -1828,6 +1955,8 @@ static void draw_plots(struct graph_info *ginfo, gint new_width)
 		plot->p2 = 0;
 		plot->p3 = 0;
 		plot->last_color = -1;
+		plot->info.last_line_x = -1;
+		plot->info.last_box_x = -1;
 
 		gdk_draw_line(ginfo->curr_pixmap, ginfo->draw->style->black_gc,
 			      0, PLOT_LINE(i), new_width, PLOT_LINE(i));
@@ -1840,6 +1969,7 @@ static void draw_plots(struct graph_info *ginfo, gint new_width)
 	tracecmd_set_all_cpus_to_timestamp(ginfo->handle,
 					   ginfo->view_start_time);
 
+	gettimeofday(&tv_start, NULL);
 	trace_set_cursor(GDK_WATCH);
 
 	/* Shortcut if we don't have any task plots */
@@ -1901,6 +2031,14 @@ out:
 		plot->gc = NULL;
 	}
 	trace_put_cursor();
+	gettimeofday(&tv_stop, NULL);
+	if (tv_start.tv_usec > tv_stop.tv_usec) {
+		tv_stop.tv_usec += 1000000;
+		tv_stop.tv_sec--;
+	}
+	if (TIME_DRAW)
+		printf("Time to draw: %ld.%06ld\n", tv_stop.tv_sec - tv_start.tv_sec,
+		       tv_stop.tv_usec - tv_start.tv_usec);
 }
 
 
@@ -2236,7 +2374,8 @@ configure_event(GtkWidget *widget, GdkEventMotion *event, gpointer data)
 
 	gtk_widget_set_size_request(widget, ginfo->draw_width, ginfo->draw_height);
 
-	redraw_pixmap_backend(ginfo);
+	if (!ginfo->no_draw)
+		redraw_pixmap_backend(ginfo);
 
 	/* debug */
 	ginfo->hadj_value = gtk_adjustment_get_value(ginfo->hadj);
@@ -2379,6 +2518,13 @@ create_graph_info(struct graph_info *ginfo)
 	return info;
 }
 
+static void free_int_array(int **array)
+{
+	if (*array != null_int_array)
+		free(*array);
+	*array = NULL;
+}
+
 void trace_graph_free_info(struct graph_info *ginfo)
 {
 	if (ginfo->handle) {
@@ -2390,6 +2536,11 @@ void trace_graph_free_info(struct graph_info *ginfo)
 		ginfo->cursor = 0;
 	}
 	ginfo->handle = NULL;
+
+	free_int_array(&ginfo->hard_irq_entry_ids);
+	free_int_array(&ginfo->hard_irq_exit_ids);
+	free_int_array(&ginfo->soft_irq_entry_ids);
+	free_int_array(&ginfo->soft_irq_exit_ids);
 }
 
 static int load_handle(struct graph_info *ginfo,

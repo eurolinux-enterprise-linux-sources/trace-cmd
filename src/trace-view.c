@@ -18,6 +18,7 @@
  * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
  */
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
 #include <gtk/gtk.h>
@@ -30,6 +31,7 @@
 #include "trace-compat.h"
 #include "cpu.h"
 #include "event-utils.h"
+#include "trace-local.h"
 
 enum {
 	COL_INDEX,
@@ -335,9 +337,7 @@ void trace_view_update_filters(GtkWidget *treeview,
 
 static void select_row_from_path(GtkTreeView *tree, GtkTreePath *path)
 {
-	GtkTreeSelection *selection;
-
-	selection = gtk_tree_view_get_selection(tree);
+	gtk_tree_view_get_selection(tree);
 	gtk_tree_view_set_cursor(tree, path, NULL, FALSE);
 }
 
@@ -864,6 +864,8 @@ static void search_tree(gpointer data)
 	path = gtk_tree_model_get_path(model, &iter);
 	select_row_from_path(info->treeview, path);
 	gtk_tree_path_free(path);
+
+	gtk_widget_grab_focus(GTK_WIDGET(info->entry));
 }
 
 void trace_view_search_setup(GtkBox *box, GtkTreeView *treeview)

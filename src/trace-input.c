@@ -36,7 +36,10 @@
 #include <ctype.h>
 #include <errno.h>
 
+#include <linux/time64.h>
+
 #include "trace-cmd-local.h"
+#include "trace-local.h"
 #include "kbuffer.h"
 #include "list.h"
 
@@ -48,12 +51,22 @@
 /* for debugging read instead of mmap */
 static int force_read = 0;
 
+struct page_map {
+	struct list_head	list;
+	off64_t			offset;
+	off64_t			size;
+	void			*map;
+	int			ref_count;
+};
+
 struct page {
 	struct list_head	list;
 	off64_t			offset;
 	struct tracecmd_input	*handle;
+	struct page_map		*page_map;
 	void			*map;
 	int			ref_count;
+	int			cpu;
 	long long		lost_events;
 #if DEBUG_RECORD
 	struct pevent_record	*records;
@@ -67,7 +80,9 @@ struct cpu_data {
 	unsigned long long	offset;
 	unsigned long long	size;
 	unsigned long long	timestamp;
+	struct list_head	page_maps;
 	struct list_head	pages;
+	struct page_map		*page_map;
 	struct pevent_record	*next;
 	struct page		*page;
 	struct kbuffer		*kbuf;
@@ -88,6 +103,7 @@ struct tracecmd_input {
 	int			fd;
 	int			long_size;
 	int			page_size;
+	int			page_map_size;
 	int			cpus;
 	int			ref;
 	int			nr_buffers;	/* buffer instances */
@@ -96,6 +112,7 @@ struct tracecmd_input {
 	bool			use_pipe;
 	struct cpu_data 	*cpu_data;
 	unsigned long long	ts_offset;
+	double			ts2secs;
 	char *			cpustats;
 	char *			uname;
 	struct input_buffer_instance	*buffers;
@@ -108,6 +125,9 @@ struct tracecmd_input {
 	size_t			ftrace_files_start;
 	size_t			event_files_start;
 	size_t			total_file_size;
+
+	/* For custom profilers. */
+	tracecmd_show_data_func	show_data_func;
 };
 
 __thread struct tracecmd_input *tracecmd_curr_thread_handle;
@@ -176,13 +196,13 @@ static const char *show_records(struct list_head *pages)
 
 static int init_cpu(struct tracecmd_input *handle, int cpu);
 
-static int do_read(struct tracecmd_input *handle, void *data, int size)
+static ssize_t do_read(struct tracecmd_input *handle, void *data, size_t size)
 {
-	int tot = 0;
-	int r;
+	ssize_t tot = 0;
+	ssize_t r;
 
 	do {
-		r = read(handle->fd, data, size - tot);
+		r = read(handle->fd, data + tot, size - tot);
 		tot += r;
 
 		if (!r)
@@ -194,10 +214,10 @@ static int do_read(struct tracecmd_input *handle, void *data, int size)
 	return tot;
 }
 
-static int
-do_read_check(struct tracecmd_input *handle, void *data, int size)
+static ssize_t
+do_read_check(struct tracecmd_input *handle, void *data, size_t size)
 {
-	int ret;
+	ssize_t ret;
 
 	ret = do_read(handle, data, size);
 	if (ret < 0)
@@ -212,9 +232,9 @@ static char *read_string(struct tracecmd_input *handle)
 {
 	char buf[BUFSIZ];
 	char *str = NULL;
-	int size = 0;
-	int i;
-	int r;
+	size_t size = 0;
+	ssize_t i;
+	ssize_t r;
 
 	for (;;) {
 		r = do_read(handle, buf, BUFSIZ);
@@ -274,7 +294,7 @@ static char *read_string(struct tracecmd_input *handle)
 	return NULL;
 }
 
-static unsigned int read4(struct tracecmd_input *handle)
+static int read4(struct tracecmd_input *handle, unsigned int *size)
 {
 	struct pevent *pevent = handle->pevent;
 	unsigned int data;
@@ -282,10 +302,11 @@ static unsigned int read4(struct tracecmd_input *handle)
 	if (do_read_check(handle, &data, 4))
 		return -1;
 
-	return __data2host4(pevent, data);
+	*size = __data2host4(pevent, data);
+	return 0;
 }
 
-static unsigned long long read8(struct tracecmd_input *handle)
+static int read8(struct tracecmd_input *handle, unsigned long long *size)
 {
 	struct pevent *pevent = handle->pevent;
 	unsigned long long data;
@@ -293,13 +314,14 @@ static unsigned long long read8(struct tracecmd_input *handle)
 	if (do_read_check(handle, &data, 8))
 		return -1;
 
-	return __data2host8(pevent, data);
+	*size = __data2host8(pevent, data);
+	return 0;
 }
 
 static int read_header_files(struct tracecmd_input *handle)
 {
 	struct pevent *pevent = handle->pevent;
-	long long size;
+	unsigned long long size;
 	char *header;
 	char buf[BUFSIZ];
 
@@ -309,8 +331,7 @@ static int read_header_files(struct tracecmd_input *handle)
 	if (memcmp(buf, "header_page", 12) != 0)
 		return -1;
 
-	size = read8(handle);
-	if (size < 0)
+	if (read8(handle, &size) < 0)
 		return -1;
 
 	header = malloc(size);
@@ -335,8 +356,7 @@ static int read_header_files(struct tracecmd_input *handle)
 	if (memcmp(buf, "header_event", 13) != 0)
 		return -1;
 
-	size = read8(handle);
-	if (size < 0)
+	if (read8(handle, &size) < 0)
 		return -1;
 
 	header = malloc(size);
@@ -365,8 +385,10 @@ static int regex_event_buf(const char *file, int size, regex_t *epreg)
 	int ret;
 
 	buf = malloc(size + 1);
-	if (!buf)
-		die("malloc");
+	if (!buf) {
+		warning("Insufficient memory");
+		return 0;
+	}
 
 	strncpy(buf, file, size);
 	buf[size] = 0;
@@ -464,7 +486,7 @@ static int make_preg_files(const char *regex, regex_t *system,
 
 	buf = strdup(regex);
 	if (!buf)
-		die("malloc");
+		return -ENOMEM;
 
 	sstr = strtok(buf, ":");
 	estr = strtok(NULL, ":");
@@ -499,11 +521,10 @@ static int read_ftrace_files(struct tracecmd_input *handle, const char *regex)
 	regex_t epreg;
 	regex_t *sreg = NULL;
 	regex_t *ereg = NULL;
+	unsigned int count, i;
 	int print_all = 0;
 	int unique;
-	int count;
 	int ret;
-	int i;
 
 	if (regex) {
 		sreg = &spreg;
@@ -532,13 +553,11 @@ static int read_ftrace_files(struct tracecmd_input *handle, const char *regex)
 		}
 	}
 
-	count = read4(handle);
-	if (count < 0)
+	if (read4(handle, &count) < 0)
 		return -1;
 
 	for (i = 0; i < count; i++) {
-		size = read8(handle);
-		if (size < 0)
+		if (read8(handle, &size) < 0)
 			return -1;
 		ret = read_ftrace_file(handle, size, print_all, ereg);
 		if (ret < 0)
@@ -565,13 +584,13 @@ static int read_event_files(struct tracecmd_input *handle, const char *regex)
 	regex_t *sreg = NULL;
 	regex_t *ereg = NULL;
 	regex_t *reg;
-	int systems;
+	unsigned int systems;
+	unsigned int count;
+	unsigned int i, x;
 	int print_all;
 	int sys_printed;
-	int count;
 	int unique;
 	int ret;
-	int i,x;
 
 	if (regex) {
 		sreg = &spreg;
@@ -581,8 +600,7 @@ static int read_event_files(struct tracecmd_input *handle, const char *regex)
 			return -1;
 	}
 
-	systems = read4(handle);
-	if (systems < 0)
+	if (read4(handle, &systems) < 0)
 		return -1;
 
 	for (i = 0; i < systems; i++) {
@@ -615,13 +633,11 @@ static int read_event_files(struct tracecmd_input *handle, const char *regex)
 			}
 		}
 
-		count = read4(handle);
-		if (count < 0)
+		if (read4(handle, &count) < 0)
 			goto failed;
 
 		for (x=0; x < count; x++) {
-			size = read8(handle);
-			if (size < 0)
+			if (read8(handle, &size) < 0)
 				goto failed;
 
 			ret = read_event_file(handle, system, size,
@@ -653,15 +669,13 @@ static int read_event_files(struct tracecmd_input *handle, const char *regex)
 static int read_proc_kallsyms(struct tracecmd_input *handle)
 {
 	struct pevent *pevent = handle->pevent;
-	int size;
+	unsigned int size;
 	char *buf;
 
-	size = read4(handle);
+	if (read4(handle, &size) < 0)
+		return -1;
 	if (!size)
 		return 0; /* OK? */
-
-	if (size < 0)
-		return -1;
 
 	buf = malloc(size+1);
 	if (!buf)
@@ -672,7 +686,7 @@ static int read_proc_kallsyms(struct tracecmd_input *handle)
 	}
 	buf[size] = 0;
 
-	parse_proc_kallsyms(pevent, buf, size);
+	tracecmd_parse_proc_kallsyms(pevent, buf, size);
 
 	free(buf);
 	return 0;
@@ -680,15 +694,13 @@ static int read_proc_kallsyms(struct tracecmd_input *handle)
 
 static int read_ftrace_printk(struct tracecmd_input *handle)
 {
-	int size;
+	unsigned int size;
 	char *buf;
 
-	size = read4(handle);
+	if (read4(handle, &size) < 0)
+		return -1;
 	if (!size)
 		return 0; /* OK? */
-
-	if (size < 0)
-		return -1;
 
 	buf = malloc(size + 1);
 	if (!buf)
@@ -700,7 +712,7 @@ static int read_ftrace_printk(struct tracecmd_input *handle)
 
 	buf[size] = 0;
 
-	parse_ftrace_printk(handle->pevent, buf, size);
+	tracecmd_parse_ftrace_printk(handle->pevent, buf, size);
 
 	free(buf);
 
@@ -792,12 +804,123 @@ static int read_page(struct tracecmd_input *handle, off64_t offset,
 	return 0;
 }
 
+/* page_map_size must be a power of two */
+static unsigned long long normalize_size(unsigned long long size)
+{
+	/* From Hacker's Delight: or bits after first set bit to all 1s */
+	size |= (size >> 1);
+	size |= (size >> 2);
+	size |= (size >> 4);
+	size |= (size >> 8);
+	size |= (size >> 16);
+	size |= (size >> 32);
+
+	/* Clear all bits except first one for previous power of two */
+	return size - (size >> 1);
+}
+
+static void free_page_map(struct page_map *page_map)
+{
+	page_map->ref_count--;
+	if (page_map->ref_count)
+		return;
+
+	munmap(page_map->map, page_map->size);
+	list_del(&page_map->list);
+	free(page_map);
+}
+
+static void *allocate_page_map(struct tracecmd_input *handle,
+			       struct page *page, int cpu, off64_t offset)
+{
+	struct cpu_data *cpu_data = &handle->cpu_data[cpu];
+	struct page_map *page_map;
+	off64_t map_size;
+	off64_t map_offset;
+	void *map;
+	int ret;
+
+	if (handle->read_page) {
+		map = malloc(handle->page_size);
+		if (!map)
+			return NULL;
+		ret = read_page(handle, offset, cpu, map);
+		if (ret < 0) {
+			free(map);
+			return NULL;
+		}
+		return map;
+	}
+
+	map_size = handle->page_map_size;
+	map_offset = offset & ~(map_size - 1);
+
+	if (map_offset < cpu_data->file_offset) {
+		map_size -= cpu_data->file_offset - map_offset;
+		map_offset = cpu_data->file_offset;
+	}
+
+	page_map = cpu_data->page_map;
+
+	if (page_map && page_map->offset == map_offset)
+		goto out;
+
+	list_for_each_entry(page_map, &cpu_data->page_maps, list) {
+		if (page_map->offset == map_offset)
+			goto out;
+	}
+
+	page_map = calloc(1, sizeof(*page_map));
+	if (!page_map)
+		return NULL;
+
+	if (map_offset + map_size > cpu_data->file_offset + cpu_data->file_size)
+		map_size -= map_offset + map_size -
+			(cpu_data->file_offset + cpu_data->file_size);
+
+ again:
+	page_map->size = map_size;
+	page_map->offset = map_offset;
+
+	page_map->map = mmap(NULL, map_size, PROT_READ, MAP_PRIVATE,
+			 handle->fd, map_offset);
+
+	if (page->map == MAP_FAILED) {
+		/* Try a smaller map */
+		map_size >>= 1;
+		if (map_size < handle->page_size) {
+			free(page_map);
+			return NULL;
+		}
+		handle->page_map_size = map_size;
+		map_offset = offset & ~(map_size - 1);
+		/*
+		 * Note, it is now possible to get duplicate memory
+		 * maps. But that's fine, the previous maps with
+		 * larger sizes will eventually be unmapped.
+		 */
+		goto again;
+	}
+
+	list_add(&page_map->list, &cpu_data->page_maps);
+ out:
+	if (cpu_data->page_map != page_map) {
+		struct page_map *old_map = cpu_data->page_map;
+		cpu_data->page_map = page_map;
+		page_map->ref_count++;
+		if (old_map)
+			free_page_map(old_map);
+	}
+	page->page_map = page_map;
+	page_map->ref_count++;
+	return page_map->map + offset - page_map->offset;
+}
+
 static struct page *allocate_page(struct tracecmd_input *handle,
 				  int cpu, off64_t offset)
 {
 	struct cpu_data *cpu_data = &handle->cpu_data[cpu];
 	struct page *page;
-	int ret;
 
 	list_for_each_entry(page, &cpu_data->pages, list) {
 		if (page->offset == offset) {
@@ -813,22 +936,9 @@ static struct page *allocate_page(struct tracecmd_input *handle,
 	memset(page, 0, sizeof(*page));
 	page->offset = offset;
 	page->handle = handle;
+	page->cpu = cpu;
 
-	if (handle->read_page) {
-		page->map = malloc(handle->page_size);
-		if (page->map) {
-			ret = read_page(handle, offset, cpu, page->map);
-			if (ret < 0) {
-				free(page->map);
-				page->map = NULL;
-			}
-		}
-	} else {
-		page->map = mmap(NULL, handle->page_size, PROT_READ, MAP_PRIVATE,
-				 handle->fd, offset);
-		if (page->map == MAP_FAILED)
-			page->map = NULL;
-	}
+	page->map = allocate_page_map(handle, page, cpu, offset);
 
 	if (!page->map) {
 		free(page);
@@ -853,7 +963,7 @@ static void __free_page(struct tracecmd_input *handle, struct page *page)
 	if (handle->read_page)
 		free(page->map);
 	else
-		munmap(page->map, handle->page_size);
+		free_page_map(page->page_map);
 
 	list_del(&page->list);
 	free(page);
@@ -944,10 +1054,15 @@ static int update_page_info(struct tracecmd_input *handle, int cpu)
 	}
 
 	kbuffer_load_subbuffer(kbuf, ptr);
-	if (kbuffer_subbuffer_size(kbuf) > handle->page_size)
-		die("bad page read, with size of %d",
+	if (kbuffer_subbuffer_size(kbuf) > handle->page_size) {
+		warning("bad page read, with size of %d",
 		    kbuffer_subbuffer_size(kbuf));
+		return -1;
+	}
 	handle->cpu_data[cpu].timestamp = kbuffer_timestamp(kbuf) + handle->ts_offset;
+
+	if (handle->ts2secs)
+		handle->cpu_data[cpu].timestamp *= handle->ts2secs;
 
 	return 0;
 }
@@ -1669,6 +1784,11 @@ read_again:
 
 	handle->cpu_data[cpu].timestamp = ts + handle->ts_offset;
 
+	if (handle->ts2secs) {
+		handle->cpu_data[cpu].timestamp *= handle->ts2secs;
+		ts *= handle->ts2secs;
+	}
+
 	index = kbuffer_curr_offset(kbuf);
 
 	record = malloc(sizeof(*record));
@@ -1743,31 +1863,57 @@ tracecmd_read_data(struct tracecmd_input *handle, int cpu)
 struct pevent_record *
 tracecmd_read_next_data(struct tracecmd_input *handle, int *rec_cpu)
 {
-	unsigned long long ts;
 	struct pevent_record *record;
-	int first_record = 1;
-	int next;
+	int next_cpu;
+
+	record = tracecmd_peek_next_data(handle, &next_cpu);
+	if (!record)
+		return NULL;
+
+	if (rec_cpu)
+		*rec_cpu = next_cpu;
+
+	return tracecmd_read_data(handle, next_cpu);
+}
+
+/**
+ * tracecmd_peek_next_data - return the next record
+ * @handle: input handle to the trace.dat file
+ * @rec_cpu: return pointer to the CPU that the record belongs to
+ *
+ * This returns the next record by time. This is different than
+ * tracecmd_peek_data in that it looks at all CPUs. It does a peek
+ * at each CPU and the record with the earliest time stame is
+ * returned. If @rec_cpu is not NULL it gets the CPU id the record was
+ * on. It does not increment the CPU iterator.
+ */
+struct pevent_record *
+tracecmd_peek_next_data(struct tracecmd_input *handle, int *rec_cpu)
+{
+	unsigned long long ts;
+	struct pevent_record *record, *next_record = NULL;
+	int next_cpu;
 	int cpu;
 
 	if (rec_cpu)
 		*rec_cpu = -1;
 
-	next = -1;
+	next_cpu = -1;
 	ts = 0;
 
 	for (cpu = 0; cpu < handle->cpus; cpu++) {
 		record = tracecmd_peek_data(handle, cpu);
-		if (record && (first_record || record->ts < ts)) {
+		if (record && (!next_record || record->ts < ts)) {
 			ts = record->ts;
-			next = cpu;
-			first_record = 0;
+			next_cpu = cpu;
+			next_record = record;
 		}
 	}
 
-	if (next >= 0) {
+	if (next_record) {
 		if (rec_cpu)
-			*rec_cpu = next;
-		return tracecmd_read_data(handle, next);
+			*rec_cpu = next_cpu;
+		return next_record;
 	}
 
 	return NULL;
@@ -1881,6 +2027,7 @@ static int init_cpu(struct tracecmd_input *handle, int cpu)
 	cpu_data->timestamp = 0;
 
 	list_head_init(&cpu_data->pages);
+	list_head_init(&cpu_data->page_maps);
 
 	if (!cpu_data->size) {
 		printf("CPU %d is empty\n", cpu);
@@ -1929,6 +2076,22 @@ static int init_cpu(struct tracecmd_input *handle, int cpu)
 	return 0;
 }
 
+void tracecmd_set_ts_offset(struct tracecmd_input *handle,
+			    unsigned long long offset)
+{
+	handle->ts_offset = offset;
+}
+
+void tracecmd_set_ts2secs(struct tracecmd_input *handle,
+			 unsigned long long hz)
+{
+	double ts2secs;
+
+	ts2secs = (double)NSEC_PER_SEC / (double)hz;
+	handle->ts2secs = ts2secs;
+	handle->use_trace_clock = false;
+}
+
 static int handle_options(struct tracecmd_input *handle)
 {
 	unsigned long long offset;
@@ -1939,6 +2102,7 @@ static int handle_options(struct tracecmd_input *handle)
 	struct input_buffer_instance *buffer;
 	struct hook_list *hook;
 	char *buf;
+	int cpus;
 
 	for (;;) {
 		if (do_read_check(handle, &option, 2))
@@ -1951,7 +2115,9 @@ static int handle_options(struct tracecmd_input *handle)
 		if (do_read_check(handle, &size, 4))
 			return -1;
 		size = __data2host4(handle->pevent, size);
-		buf = malloc_or_die(size);
+		buf = malloc(size);
+		if (!buf)
+			return -ENOMEM;
 		if (do_read_check(handle, buf, size))
 			return -1;
 
@@ -1968,13 +2134,23 @@ static int handle_options(struct tracecmd_input *handle)
 			offset = strtoll(buf, NULL, 0);
 			/* Convert from micro to nano */
 			offset *= 1000;
-			handle->ts_offset = offset;
+			handle->ts_offset += offset;
+			break;
+		case TRACECMD_OPTION_OFFSET:
+			/*
+			 * Similar to date option, but just adds an
+			 * offset to the timestamp.
+			 */
+			if (handle->flags & TRACECMD_FL_IGNORE_DATE)
+				break;
+			offset = strtoll(buf, NULL, 0);
+			handle->ts_offset += offset;
 			break;
 		case TRACECMD_OPTION_CPUSTAT:
 			buf[size-1] = '\n';
 			cpustats = realloc(cpustats, cpustats_size + size + 1);
 			if (!cpustats)
-				die("realloc");
+				return -ENOMEM;
 			memcpy(cpustats + cpustats_size, buf, size);
 			cpustats_size += size;
 			cpustats[cpustats_size] = 0;
@@ -1985,16 +2161,20 @@ static int handle_options(struct tracecmd_input *handle)
 			handle->buffers = realloc(handle->buffers,
 						  sizeof(*handle->buffers) * handle->nr_buffers);
 			if (!handle->buffers)
-				die("realloc");
+				return -ENOMEM;
 			buffer = &handle->buffers[handle->nr_buffers - 1];
 			buffer->name = strdup(buf + 8);
-			if (!buffer->name)
-				die("strdup");
+			if (!buffer->name) {
+				free(handle->buffers);
+				handle->buffers = NULL;
+				return -ENOMEM;
+			}
 			offset = *(unsigned long long *)buf;
 			buffer->offset = __data2host8(handle->pevent, offset);
 			break;
 		case TRACECMD_OPTION_TRACECLOCK:
-			handle->use_trace_clock = true;
+			if (!handle->ts2secs)
+				handle->use_trace_clock = true;
 			break;
 		case TRACECMD_OPTION_UNAME:
 			handle->uname = strdup(buf);
@@ -2003,6 +2183,10 @@ static int handle_options(struct tracecmd_input *handle)
 			hook = tracecmd_create_event_hook(buf);
 			hook->next = handle->hooks;
 			handle->hooks = hook;
+			break;
+		case TRACECMD_OPTION_CPUCOUNT:
+			cpus = *(int *)buf;
+			handle->cpus = __data2host4(handle->pevent, cpus);
 			break;
 		default:
 			warning("unknown option %d", option);
@@ -2024,11 +2208,16 @@ static int read_cpu_data(struct tracecmd_input *handle)
 	enum kbuffer_long_size long_size;
 	enum kbuffer_endian endian;
 	unsigned long long size;
+	unsigned long long max_size = 0;
+	unsigned long long pages;
 	char buf[10];
+	int cpus;
 	int cpu;
 
 	if (do_read_check(handle, buf, 10))
 		return -1;
+
+	cpus = handle->cpus;
 
 	/* check if this handles options */
 	if (strncmp(buf, "options", 7) == 0) {
@@ -2079,11 +2268,13 @@ static int read_cpu_data(struct tracecmd_input *handle)
 		if (pevent->old_format)
 			kbuffer_set_old_format(handle->cpu_data[cpu].kbuf);
 
-		offset = read8(handle);
-		size = read8(handle);
+		read8(handle, &offset);
+		read8(handle, &size);
 
 		handle->cpu_data[cpu].file_offset = offset;
 		handle->cpu_data[cpu].file_size = size;
+		if (size > max_size)
+			max_size = size;
 
 		if (size && (offset + size > handle->total_file_size)) {
 			/* this happens if the file got truncated */
@@ -2093,9 +2284,40 @@ static int read_cpu_data(struct tracecmd_input *handle)
 			errno = EINVAL;
 			goto out_free;
 		}
+	}
 
+	/* Calculate about a meg of pages for buffering */
+	pages = handle->page_size ? max_size / handle->page_size : 0;
+	if (!pages)
+		pages = 1;
+	pages = normalize_size(pages);
+	handle->page_map_size = handle->page_size * pages;
+	if (handle->page_map_size < handle->page_size)
+		handle->page_map_size = handle->page_size;
+
+
+	for (cpu = 0; cpu < handle->cpus; cpu++) {
 		if (init_cpu(handle, cpu))
 			goto out_free;
+	}
+
+	/*
+	 * It is possible that an option changed the number of CPUs.
+	 * If that happened, then there's "empty" cpu data saved for
+	 * backward compatibility.
+	 */
+	if (cpus < handle->cpus) {
+		unsigned long long ignore;
+		int once = 0;
+
+		read8(handle, &ignore); /* offset */
+		read8(handle, &ignore); /* size */
+		if (ignore != 0) {
+			if (!once) {
+				warning("ignored CPU data not zero size");
+				once++;
+			}
+		}
 	}
 
 	return 0;
@@ -2112,8 +2334,7 @@ static int read_cpu_data(struct tracecmd_input *handle)
 static int read_data_and_size(struct tracecmd_input *handle,
 				     char **data, unsigned long long *size)
 {
-	*size = read8(handle);
-	if (*size < 0)
+	if (read8(handle, size) < 0)
 		return -1;
 	*data = malloc(*size + 1);
 	if (!*data)
@@ -2135,7 +2356,7 @@ static int read_and_parse_cmdlines(struct tracecmd_input *handle)
 	if (read_data_and_size(handle, &cmdlines, &size) < 0)
 		return -1;
 	cmdlines[size] = 0;
-	parse_cmdlines(pevent, cmdlines, size);
+	tracecmd_parse_cmdlines(pevent, cmdlines, size);
 	free(cmdlines);
 	return 0;
 }
@@ -2149,7 +2370,7 @@ static int read_and_parse_trace_clock(struct tracecmd_input *handle,
 	if (read_data_and_size(handle, &trace_clock, &size) < 0)
 		return -1;
 	trace_clock[size] = 0;
-	parse_trace_clock(pevent, trace_clock, size);
+	tracecmd_parse_trace_clock(pevent, trace_clock, size);
 	free(trace_clock);
 	return 0;
 }
@@ -2164,11 +2385,12 @@ static int read_and_parse_trace_clock(struct tracecmd_input *handle,
 int tracecmd_init_data(struct tracecmd_input *handle)
 {
 	struct pevent *pevent = handle->pevent;
+    unsigned int cpus;
 	int ret;
 
-	handle->cpus = read4(handle);
-	if (handle->cpus < 0)
+	if (read4(handle, &cpus) < 0)
 		return -1;
+	handle->cpus = cpus;
 
 	pevent_set_cpus(pevent, handle->cpus);
 
@@ -2186,7 +2408,7 @@ int tracecmd_init_data(struct tracecmd_input *handle)
 		if (read_and_parse_trace_clock(handle, pevent) < 0) {
 			char clock[] = "[local]";
 			warning("File has trace_clock bug, using local clock");
-			parse_trace_clock(pevent, clock, 8);
+			tracecmd_parse_trace_clock(pevent, clock, 8);
 		}
 	}
 
@@ -2367,6 +2589,7 @@ struct tracecmd_input *tracecmd_alloc_fd(int fd)
 {
 	struct tracecmd_input *handle;
 	char test[] = { 23, 8, 68 };
+    unsigned int page_size;
 	char *version;
 	char buf[BUFSIZ];
 
@@ -2413,7 +2636,8 @@ struct tracecmd_input *tracecmd_alloc_fd(int fd)
 	do_read_check(handle, buf, 1);
 	handle->long_size = buf[0];
 
-	handle->page_size = read4(handle);
+	read4(handle, &page_size);
+	handle->page_size = page_size;
 
 	handle->header_files_start =
 		lseek64(handle->fd, 0, SEEK_CUR);
@@ -2542,6 +2766,8 @@ void tracecmd_close(struct tracecmd_input *handle)
 		free_page(handle, cpu);
 		if (handle->cpu_data && handle->cpu_data[cpu].kbuf) {
 			kbuffer_free(handle->cpu_data[cpu].kbuf);
+			if (handle->cpu_data[cpu].page_map)
+				free_page_map(handle->cpu_data[cpu].page_map);
 
 			if (!list_empty(&handle->cpu_data[cpu].pages))
 				warning("pages still allocated on cpu %d%s",
@@ -2567,36 +2793,30 @@ void tracecmd_close(struct tracecmd_input *handle)
 	free(handle);
 }
 
-static long long read_copy_size8(struct tracecmd_input *handle, int fd)
+static int read_copy_size8(struct tracecmd_input *handle, int fd, unsigned long long *size)
 {
-	long long size;
-
 	/* read size */
-	if (do_read_check(handle, &size, 8))
+	if (do_read_check(handle, size, 8))
 		return -1;
 
-	if (__do_write_check(fd, &size, 8))
+	if (__do_write_check(fd, size, 8))
 		return -1;
 
-	size = __data2host8(handle->pevent, size);
-
-	return size;
+	*size = __data2host8(handle->pevent, *size);
+	return 0;
 }
 
-static int read_copy_size4(struct tracecmd_input *handle, int fd)
+static int read_copy_size4(struct tracecmd_input *handle, int fd, unsigned int *size)
 {
-	int size;
-
 	/* read size */
-	if (do_read_check(handle, &size, 4))
+	if (do_read_check(handle, size, 4))
 		return -1;
 
-	if (__do_write_check(fd, &size, 4))
+	if (__do_write_check(fd, size, 4))
 		return -1;
 
-	size = __data2host4(handle->pevent, size);
-
-	return size;
+	*size = __data2host4(handle->pevent, *size);
+	return 0;
 }
 
 static int read_copy_data(struct tracecmd_input *handle,
@@ -2624,7 +2844,7 @@ static int read_copy_data(struct tracecmd_input *handle,
 
 static int copy_header_files(struct tracecmd_input *handle, int fd)
 {
-	long long size;
+	unsigned long long size;
 
 	lseek64(handle->fd, handle->header_files_start, SEEK_SET);
 
@@ -2632,8 +2852,7 @@ static int copy_header_files(struct tracecmd_input *handle, int fd)
 	if (read_copy_data(handle, 12, fd) < 0)
 		return -1;
 
-	size = read_copy_size8(handle, fd);
-	if (size < 0)
+	if (read_copy_size8(handle, fd, &size) < 0)
 		return -1;
 
 	if (read_copy_data(handle, size, fd) < 0)
@@ -2643,8 +2862,7 @@ static int copy_header_files(struct tracecmd_input *handle, int fd)
 	if (read_copy_data(handle, 13, fd) < 0)
 		return -1;
 
-	size = read_copy_size8(handle, fd);
-	if (size < 0)
+	if (read_copy_size8(handle, fd, &size) < 0)
 		return -1;
 
 	if (read_copy_data(handle, size, fd) < 0)
@@ -2656,17 +2874,15 @@ static int copy_header_files(struct tracecmd_input *handle, int fd)
 static int copy_ftrace_files(struct tracecmd_input *handle, int fd)
 {
 	unsigned long long size;
-	int count;
-	int i;
+	unsigned int count;
+	unsigned int i;
 
-	count = read_copy_size4(handle, fd);
-	if (count < 0)
+	if (read_copy_size4(handle, fd, &count) < 0)
 		return -1;
 
 	for (i = 0; i < count; i++) {
 
-		size = read_copy_size8(handle, fd);
-		if (size < 0)
+		if (read_copy_size8(handle, fd, &size) < 0)
 			return -1;
 
 		if (read_copy_data(handle, size, fd) < 0)
@@ -2680,13 +2896,11 @@ static int copy_event_files(struct tracecmd_input *handle, int fd)
 {
 	unsigned long long size;
 	char *system;
-	int systems;
-	int count;
-	int ret;
-	int i,x;
+	unsigned int systems;
+	unsigned int count;
+	unsigned int i,x;
 
-	systems = read_copy_size4(handle, fd);
-	if (systems < 0)
+	if (read_copy_size4(handle, fd, &systems) < 0)
 		return -1;
 
 	for (i = 0; i < systems; i++) {
@@ -2699,17 +2913,14 @@ static int copy_event_files(struct tracecmd_input *handle, int fd)
 		}
 		free(system);
 
-		count = read_copy_size4(handle, fd);
-		if (count < 0)
+		if (read_copy_size4(handle, fd, &count) < 0)
 			return -1;
 
 		for (x=0; x < count; x++) {
-			size = read_copy_size8(handle, fd);
-			if (size < 0)
+			if (read_copy_size8(handle, fd, &size) < 0)
 				return -1;
 
-			ret = read_copy_data(handle, size, fd);
-			if (ret < 0)
+			if (read_copy_data(handle, size, fd) < 0)
 				return -1;
 		}
 	}
@@ -2719,14 +2930,12 @@ static int copy_event_files(struct tracecmd_input *handle, int fd)
 
 static int copy_proc_kallsyms(struct tracecmd_input *handle, int fd)
 {
-	int size;
+	unsigned int size;
 
-	size = read_copy_size4(handle, fd);
+	if (read_copy_size4(handle, fd, &size) < 0)
+		return -1;
 	if (!size)
 		return 0; /* OK? */
-
-	if (size < 0)
-		return -1;
 
 	if (read_copy_data(handle, size, fd) < 0)
 		return -1;
@@ -2736,14 +2945,12 @@ static int copy_proc_kallsyms(struct tracecmd_input *handle, int fd)
 
 static int copy_ftrace_printk(struct tracecmd_input *handle, int fd)
 {
-	int size;
+	unsigned int size;
 
-	size = read_copy_size4(handle, fd);
+	if (read_copy_size4(handle, fd, &size) < 0)
+		return -1;
 	if (!size)
 		return 0; /* OK? */
-
-	if (size < 0)
-		return -1;
 
 	if (read_copy_data(handle, size, fd) < 0)
 		return -1;
@@ -2753,14 +2960,12 @@ static int copy_ftrace_printk(struct tracecmd_input *handle, int fd)
 
 static int copy_command_lines(struct tracecmd_input *handle, int fd)
 {
-	unsigned long size;
+	unsigned long long size;
 
-	size = read_copy_size8(handle, fd);
+	if (read_copy_size8(handle, fd, &size) < 0)
+		return -1;
 	if (!size)
 		return 0; /* OK? */
-
-	if (size < 0)
-		return -1;
 
 	if (read_copy_data(handle, size, fd) < 0)
 		return -1;
@@ -3000,4 +3205,24 @@ struct pevent *tracecmd_get_pevent(struct tracecmd_input *handle)
 bool tracecmd_get_use_trace_clock(struct tracecmd_input *handle)
 {
 	return handle->use_trace_clock;
+}
+
+/**
+ * tracecmd_get_show_data_func - return the show data func
+ * @handle: input handle for the trace.dat file
+ */
+tracecmd_show_data_func
+tracecmd_get_show_data_func(struct tracecmd_input *handle)
+{
+	return handle->show_data_func;
+}
+
+/**
+ * tracecmd_set_show_data_func - set the show data func
+ * @handle: input handle for the trace.dat file
+ */
+void tracecmd_set_show_data_func(struct tracecmd_input *handle,
+				 tracecmd_show_data_func func)
+{
+	handle->show_data_func = func;
 }

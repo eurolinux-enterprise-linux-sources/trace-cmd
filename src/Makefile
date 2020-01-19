@@ -1,6 +1,7 @@
+# SPDX-License-Identifier: GPL-2.0
 # trace-cmd version
 TC_VERSION = 2
-TC_PATCHLEVEL = 6
+TC_PATCHLEVEL = 7
 TC_EXTRAVERSION =
 
 # Kernel Shark version
@@ -47,7 +48,10 @@ html_install = $(prefix)/share/kernelshark/html
 html_install_SQ = '$(subst ','\'',$(html_install))'
 img_install = $(prefix)/share/kernelshark/html/images
 img_install_SQ = '$(subst ','\'',$(img_install))'
-libdir ?= lib
+libdir ?= $(prefix)/lib
+libdir_SQ = '$(subst ','\'',$(libdir))'
+includedir = $(prefix)/include/trace-cmd
+includedir_SQ = '$(subst ','\'',$(includedir))'
 
 export man_dir man_dir_SQ html_install html_install_SQ INSTALL
 export img_install img_install_SQ
@@ -56,17 +60,28 @@ export DESTDIR DESTDIR_SQ
 ifeq ($(prefix),$(HOME))
 plugin_dir = $(HOME)/.trace-cmd/plugins
 python_dir = $(HOME)/.trace-cmd/python
+var_dir = $(HOME)/.trace-cmd/
 else
-plugin_dir = $(prefix)/$(libdir)/trace-cmd/plugins
-python_dir = $(prefix)/$(libdir)/trace-cmd/python
+plugin_dir = $(libdir)/trace-cmd/plugins
+python_dir = $(libdir)/trace-cmd/python
 PLUGIN_DIR = -DPLUGIN_DIR="$(plugin_dir)"
 PYTHON_DIR = -DPYTHON_DIR="$(python_dir)"
 PLUGIN_DIR_SQ = '$(subst ','\'',$(PLUGIN_DIR))'
 PYTHON_DIR_SQ = '$(subst ','\'',$(PYTHON_DIR))'
+var_dir = /var
 endif
+
+VAR_DIR = -DVAR_DIR="$(var_dir)"
+VAR_DIR_SQ = '$(subst ','\'',$(VAR_DIR))'
+var_dir_SQ = '$(subst ','\'',$(var_dir))'
 
 HELP_DIR = -DHELP_DIR=$(html_install)
 HELP_DIR_SQ = '$(subst ','\'',$(HELP_DIR))'
+#' emacs highlighting gets confused by the above escaped quote.
+
+BASH_COMPLETE_DIR ?= /etc/bash_completion.d
+
+export var_dir
 
 # copy a bit from Linux kbuild
 
@@ -77,6 +92,12 @@ ifndef VERBOSE
   VERBOSE = 0
 endif
 
+SWIG_DEFINED := $(shell if swig -help &> /dev/null; then echo 1; else echo 0; fi)
+ifeq ($(SWIG_DEFINED), 0)
+BUILD_PYTHON := report_noswig
+NO_PYTHON = 1
+endif
+
 ifndef NO_PYTHON
 PYTHON		:= ctracecmd.so
 PYTHON_GUI	:= ctracecmd.so ctracecmdgui.so
@@ -84,7 +105,7 @@ PYTHON_GUI	:= ctracecmd.so ctracecmdgui.so
 PYTHON_VERS ?= python
 
 # Can build python?
-ifeq ($(shell sh -c "pkg-config --cflags $(PYTHON_VERS) > /dev/null 2>&1 && echo y"), y)
+ifeq ($(shell sh -c "pkg-config --cflags $(PYTHON_VERS) > /dev/null 2>&1 && which swig && echo y"), y)
 	PYTHON_PLUGINS := plugin_python.so
 	BUILD_PYTHON := $(PYTHON) $(PYTHON_PLUGINS)
 	PYTHON_SO_INSTALL := ctracecmd.install
@@ -216,7 +237,7 @@ export Q VERBOSE
 TRACECMD_VERSION = $(TC_VERSION).$(TC_PATCHLEVEL).$(TC_EXTRAVERSION)
 KERNELSHARK_VERSION = $(KS_VERSION).$(KS_PATCHLEVEL).$(KS_EXTRAVERSION)
 
-INCLUDES = -I. -I $(srctree)/../../include $(CONFIG_INCLUDES)
+INCLUDES = -I. -I ./include -I $(srctree)/../../include $(CONFIG_INCLUDES)
 
 include $(src)/features.mk
 
@@ -253,7 +274,7 @@ LIBS += -laudit
 endif
 
 # Append required CFLAGS
-override CFLAGS += $(CONFIG_FLAGS) $(INCLUDES) $(PLUGIN_DIR_SQ)
+override CFLAGS += $(CONFIG_FLAGS) $(INCLUDES) $(PLUGIN_DIR_SQ) $(VAR_DIR)
 override CFLAGS += $(udis86-flags) $(blk-flags)
 
 ifeq ($(VERBOSE),1)
@@ -321,7 +342,8 @@ TRACE_GUI_OBJS = trace-filter.o trace-compat.o trace-filter-hash.o trace-dialog.
 		trace-xml.o
 TRACE_CMD_OBJS = trace-cmd.o trace-record.o trace-read.o trace-split.o trace-listen.o \
 	 trace-stack.o trace-hist.o trace-mem.o trace-snapshot.o trace-stat.o \
-	 trace-hash.o trace-profile.o trace-stream.o
+	 trace-hash.o trace-profile.o trace-stream.o trace-record.o trace-restore.o \
+	 trace-check-events.o trace-show.o trace-list.o
 TRACE_VIEW_OBJS = trace-view.o trace-view-store.o
 TRACE_GRAPH_OBJS = trace-graph.o trace-plot.o trace-plot-cpu.o trace-plot-task.o
 TRACE_VIEW_MAIN_OBJS = trace-view-main.o $(TRACE_VIEW_OBJS) $(TRACE_GUI_OBJS)
@@ -329,11 +351,12 @@ TRACE_GRAPH_MAIN_OBJS = trace-graph-main.o $(TRACE_GRAPH_OBJS) $(TRACE_GUI_OBJS)
 KERNEL_SHARK_OBJS = $(TRACE_VIEW_OBJS) $(TRACE_GRAPH_OBJS) $(TRACE_GUI_OBJS) \
 	trace-capture.o kernel-shark.o
 
-PEVENT_LIB_OBJS = event-parse.o trace-seq.o parse-filter.o parse-utils.o
+PEVENT_LIB_OBJS = event-parse.o trace-seq.o parse-filter.o parse-utils.o str_error_r.o
 TCMD_LIB_OBJS = $(PEVENT_LIB_OBJS) trace-util.o trace-input.o trace-ftrace.o \
-			trace-output.o trace-record.o trace-recorder.o \
-			trace-restore.o trace-usage.o trace-blk-hack.o \
-			kbuffer-parse.o event-plugin.o trace-hooks.o
+			trace-output.o trace-recorder.o \
+			trace-usage.o trace-blk-hack.o \
+			kbuffer-parse.o event-plugin.o trace-hooks.o \
+			trace-msg.o
 
 PLUGIN_OBJS =
 PLUGIN_OBJS += plugin_jbd2.o
@@ -414,6 +437,8 @@ libtracecmd.so: $(TCMD_LIB_OBJS)
 
 libtracecmd.a: $(TCMD_LIB_OBJS)
 	$(Q)$(do_build_static_lib)
+
+libs: libtracecmd.so libparsevent.so
 
 trace-util.o: trace_plugin_dir
 
@@ -513,17 +538,22 @@ show_gui_done:
 
 PHONY += show_gui_make
 
+define find_tag_files
+	find . -name '\.pc' -prune -o -name '*\.[ch]' \
+		! -name '\.#' -print
+endef
+
 tags:	force
 	$(RM) tags
-	find . -name '*.[ch]' | xargs ctags --extra=+f --c-kinds=+px
+	$(call find_tag_files) | xargs ctags --extra=+f --c-kinds=+px
 
 TAGS:	force
 	$(RM) TAGS
-	find . -name '*.[ch]' | xargs etags
+	$(call find_tag_files) | xargs etags
 
 cscope: force
 	$(RM) cscope*
-	find . -name '*.[ch]' | cscope -b -q
+	$(call find_tag_files) | cscope -b -q
 
 PLUGINS_INSTALL = $(subst .so,.install,$(PLUGINS)) $(subst .so,.install,$(PYTHON_PLUGINS))
 
@@ -562,7 +592,10 @@ $(PYTHON_PY_PLUGINS): %.install : %.py force
 
 install_python: $(PYTHON_SO_INSTALL) $(PYTHON_PY_PROGS) $(PYTHON_PY_LIBS) $(PYTHON_PY_PLUGINS)
 
-install_cmd: all_cmd install_plugins install_python
+install_bash_completion: force
+	$(Q)$(call do_install_data,trace-cmd.bash,$(BASH_COMPLETE_DIR))
+
+install_cmd: all_cmd install_plugins install_python install_bash_completion
 	$(Q)$(call do_install,trace-cmd,$(bindir_SQ))
 
 install: install_cmd
@@ -573,6 +606,12 @@ install_gui: install_cmd gui
 	$(Q)$(call do_install,trace-view,$(bindir_SQ))
 	$(Q)$(call do_install,trace-graph,$(bindir_SQ))
 	$(Q)$(call do_install,kernelshark,$(bindir_SQ))
+
+install_libs: libs
+	$(Q)$(call do_install,libtracecmd.so,$(libdir_SQ))
+	$(Q)$(call do_install,libparsevent.so,$(libdir_SQ))
+	$(Q)$(call do_install,event-parse.h,$(includedir_SQ))
+	$(Q)$(call do_install,trace-cmd.h,$(includedir_SQ))
 
 doc:
 	$(MAKE) -C $(src)/Documentation all
@@ -589,6 +628,11 @@ clean:
 
 
 ##### PYTHON STUFF #####
+
+report_noswig: force
+	$(Q)echo
+	$(Q)echo "    NO_PYTHON forced: swig not installed, not compling python plugins"
+	$(Q)echo
 
 PYTHON_INCLUDES = `pkg-config --cflags $(PYTHON_VERS)`
 PYTHON_LDFLAGS = `pkg-config --libs $(PYTHON_VERS)` \

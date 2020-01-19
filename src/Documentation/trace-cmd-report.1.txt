@@ -131,6 +131,17 @@ OPTIONS
     -F '.*:COMM != "trace-cmd"'
 ------------------------------------------
 
+*-I*::
+    Do not print events where the HARDIRQ latency flag is set.
+    This will filter out most events that are from interrupt context.
+    Note, it may not filter out function traced functions that are
+    in interrupt context but were called before the kernel "in interrupt"
+    flag was set.
+
+*-S*::
+    Do not print events where the SOFTIRQ latency flag is set.
+    This will filter out most events that are from soft interrupt context.
+
 *-v*::
     This causes the following filters of *-F* to filter out the matching
     events.
@@ -236,6 +247,48 @@ OPTIONS
 *--uname*::
     If the trace.dat file recorded uname during the run, this will retrieve that
     information.
+
+*--ts-offset* offset::
+    Add (or subtract if negative) an offset for all timestamps of the previous
+    data file specified with *-i*. This is useful to merge sort multiple trace.dat
+    files where the difference in the timestamp is known. For example if a trace
+    is done on a virtual guest, and another trace is done on the host. If the
+    host timestamp is 1000 units ahead of the guest, the following can be done:
+
+    trace-cmd report -i host.dat --ts-offset -1000 -i guest.dat
+
+    This will subtract 1000 timestamp units from all the host events as it merges
+    with the guest.dat events. Note, the units is for the raw units recorded in
+    the trace. If the units are nanoseconds, the addition (or subtraction) from
+    the offset will be nanoseconds even if the displayed units are microseconds.
+
+*--ts2secs* HZ::
+    Convert the current clock source into a second (nanosecond resolution)
+    output. When using clocks like x86-tsc, if the frequency is known,
+    by passing in the clock frequency, this will convert the time to seconds.
+
+    This option affects any trace.dat file given with *-i* proceeding it.
+    If this option comes before any *-i* option, then that value becomes
+    the default conversion for all other trace.dat files. If another
+    --ts2secs option appears after a *-i* trace.dat file, than that option
+    will override the default value.
+
+    Example: On a 3.4 GHz machine
+
+      trace-cmd record -p function -C x86-tsc
+
+      trace-cmd report --ts2ns 3400000000
+
+     The report will convert the cycles timestamps into a readable second
+     display. The default display resolution is microseconds, unless *-t*
+     is used.
+
+     The value of --ts-offset must still be in the raw timestamp units, even
+     with this option. The offset will be converted as well.
+
+*--ts-diff*::
+     Show the time differences between events. The difference will appear in
+     parenthesis just after the timestamp.
 
 EXAMPLES
 --------

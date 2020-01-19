@@ -17,8 +17,10 @@
  *
  * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
  */
+#include <stdlib.h>
 #include <string.h>
 #include "trace-graph.h"
+#include "trace-local.h"
 
 void trace_graph_plot_free(struct graph_info *ginfo)
 {
@@ -336,9 +338,11 @@ void trace_graph_plot_start(struct graph_info *ginfo,
 
 int trace_graph_plot_event(struct graph_info *ginfo,
 			   struct graph_plot *plot,
-			   struct pevent_record *record,
-			   struct plot_info *info)
+			   struct pevent_record *record)
+
 {
+	struct plot_info *info = &plot->info;
+
 	info->line = FALSE;
 	info->box = FALSE;
 	info->bfill = TRUE;
@@ -346,7 +350,7 @@ int trace_graph_plot_event(struct graph_info *ginfo,
 	if (!plot->cb->plot_event)
 		return 0;
 
-	return plot->cb->plot_event(ginfo, plot, record, info);
+	return plot->cb->plot_event(ginfo, plot, record);
 }
 
 void trace_graph_plot_end(struct graph_info *ginfo,

@@ -17,9 +17,11 @@
  *
  * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
  */
+#include <stdlib.h>
 #include <string.h>
 
 #include "trace-graph.h"
+#include "trace-local.h"
 #include "cpu.h"
 
 struct cpu_plot_info {
@@ -194,9 +196,7 @@ static void cpu_plot_start(struct graph_info *ginfo, struct graph_plot *plot,
 			   unsigned long long time)
 {
 	struct cpu_plot_info *cpu_info = plot->private;
-	int cpu;
 
-	cpu = cpu_info->cpu;
 	cpu_info->last_time = 0ULL;
 	cpu_info->last_pid = -1;
 	free_record(cpu_info->last_record);
@@ -209,7 +209,6 @@ static void update_last_record(struct graph_info *ginfo,
 {
 	struct tracecmd_input *handle = ginfo->handle;
 	struct pevent_record *trecord;
-	int filter;
 	int sched_pid;
 	int orig_pid;
 	int is_sched_switch;
@@ -226,9 +225,9 @@ static void update_last_record(struct graph_info *ginfo,
 	if (!trecord)
 		return;
 
-	filter = filter_record(ginfo, trecord,
-			       &orig_pid, &sched_pid,
-			       &is_sched_switch);
+	filter_record(ginfo, trecord,
+		      &orig_pid, &sched_pid,
+		      &is_sched_switch);
 	cpu_info->last_pid = is_sched_switch ? sched_pid : orig_pid;
 	cpu_info->last_record = trecord;
 	cpu_info->last_time = trecord->ts;
@@ -239,20 +238,17 @@ static void update_last_record(struct graph_info *ginfo,
 
 static int cpu_plot_event(struct graph_info *ginfo,
 			  struct graph_plot *plot,
-			  struct pevent_record *record,
-			  struct plot_info *info)
+			  struct pevent_record *record)
 {
 	struct cpu_plot_info *cpu_info = plot->private;
+	struct plot_info *info = &plot->info;
 	int sched_pid;
 	int orig_pid;
 	int is_sched_switch;
 	int filter;
 	int box_filter;
 	int pid;
-	int cpu;
 	int ret = 1;
-
-	cpu = cpu_info->cpu;
 
 	if (!record) {
 		if (!cpu_info->last_record)
@@ -282,8 +278,6 @@ static int cpu_plot_event(struct graph_info *ginfo,
 	free_record(cpu_info->last_record);
 	cpu_info->last_record = record;
 	tracecmd_record_ref(record);
-
-	cpu = cpu_info->cpu;
 
 	filter = filter_record(ginfo, record, &orig_pid, &sched_pid, &is_sched_switch);
 
@@ -374,6 +368,7 @@ int cpu_plot_display_info(struct graph_info *ginfo,
 	struct cpu_plot_info *cpu_info = plot->private;
 	struct event_format *event;
 	struct pevent_record *record;
+	struct pevent_record *next_record;
 	struct pevent *pevent;
 	unsigned long sec, usec;
 	const char *comm;
@@ -434,10 +429,18 @@ int cpu_plot_display_info(struct graph_info *ginfo,
 	}
 
 	trace_seq_printf(s, "%lu.%06lu", sec, usec);
-	if (pid)
-		trace_seq_printf(s, " %s-%d", comm, pid);
-	else
-		trace_seq_puts(s, " <idle>");
+
+	next_record = tracecmd_peek_data(ginfo->handle, cpu);
+
+	if (next_record && next_record->missed_events) {
+		trace_seq_puts(s, " MISSED EVENTS");
+	} else {
+
+		if (pid)
+			trace_seq_printf(s, " %s-%d", comm, pid);
+		else
+			trace_seq_puts(s, " <idle>");
+	}
 
 	free_record(record);
 

@@ -24,6 +24,10 @@
 #include <dirent.h>	/* for DIR */
 
 #include "trace-cmd.h"
+#include "event-utils.h"
+
+extern int debug;
+extern int quiet;
 
 /* fix stupid glib guint64 typecasts and printf formats */
 typedef unsigned long long u64;
@@ -54,6 +58,20 @@ int read_trace_files(void);
 
 void trace_record(int argc, char **argv);
 
+void trace_stop(int argc, char **argv);
+
+void trace_restart(int argc, char **argv);
+
+void trace_reset(int argc, char **argv);
+
+void trace_start(int argc, char **argv);
+
+void trace_extract(int argc, char **argv);
+
+void trace_stream(int argc, char **argv);
+
+void trace_profile(int argc, char **argv);
+
 void trace_report(int argc, char **argv);
 
 void trace_split(int argc, char **argv);
@@ -61,6 +79,10 @@ void trace_split(int argc, char **argv);
 void trace_listen(int argc, char **argv);
 
 void trace_restore(int argc, char **argv);
+
+void trace_clear(int argc, char **argv);
+
+void trace_check_events(int argc, char **argv);
 
 void trace_stack(int argc, char **argv);
 
@@ -74,23 +96,26 @@ void trace_mem(int argc, char **argv);
 
 void trace_stat(int argc, char **argv);
 
+void trace_show(int argc, char **argv);
+
+void trace_list(int argc, char **argv);
+
+void trace_usage(int argc, char **argv);
+
 struct hook_list;
 
-int trace_profile_record(struct tracecmd_input *handle,
-			 struct pevent_record *record, int cpu);
 void trace_init_profile(struct tracecmd_input *handle, struct hook_list *hooks,
 			int global);
-int trace_profile(void);
+int do_trace_profile(void);
 void trace_profile_set_merge_like_comms(void);
 
 struct tracecmd_input *
 trace_stream_init(struct buffer_instance *instance, int cpu, int fd, int cpus,
-		  int profile, struct hook_list *hooks, int global);
-int trace_stream_read(struct pid_record_data *pids, int nr_pids, struct timeval *tv,
-		      int profile);
+		  struct hook_list *hooks,
+		  tracecmd_handle_init_func handle_init, int global);
+int trace_stream_read(struct pid_record_data *pids, int nr_pids, struct timeval *tv);
 
-void trace_show_data(struct tracecmd_input *handle, struct pevent_record *record,
-		     int profile);
+void trace_show_data(struct tracecmd_input *handle, struct pevent_record *record);
 
 /* --- event interation --- */
 
@@ -135,15 +160,21 @@ char *strstrip(char *str);
 
 /* --- instance manipulation --- */
 
+enum buffer_instance_flags {
+	BUFFER_FL_KEEP		= 1 << 0,
+	BUFFER_FL_PROFILE	= 1 << 1,
+};
+
 struct func_list {
 	struct func_list *next;
 	const char *func;
+	const char *mod;
 };
 
 struct buffer_instance {
 	struct buffer_instance	*next;
 	const char		*name;
-	const char		*cpumask;
+	char			*cpumask;
 	struct event_list	*events;
 	struct event_list	**event_next;
 
@@ -152,6 +183,7 @@ struct buffer_instance {
 	struct event_list	*sched_wakeup_new_event;
 
 	const char		*plugin;
+	char			*filter_mod;
 	struct func_list	*filter_funcs;
 	struct func_list	*notrace_funcs;
 
@@ -162,11 +194,14 @@ struct buffer_instance {
 
 	struct tracecmd_input	*handle;
 
+	struct tracecmd_msg_handle *msg_handle;
+	struct tracecmd_output *network_handle;
+
+	int			flags;
 	int			tracing_on_init_val;
 	int			tracing_on_fd;
-	int			keep;
 	int			buffer_size;
-	int			profile;
+	int			cpu_count;
 };
 
 extern struct buffer_instance top_instance;
@@ -178,11 +213,18 @@ extern struct buffer_instance *first_instance;
 				  i = i == &top_instance ? buffer_instances : (i)->next)
 
 struct buffer_instance *create_instance(const char *name);
-void add_instance(struct buffer_instance *instance);
+void add_instance(struct buffer_instance *instance, int cpu_count);
 char *get_instance_file(struct buffer_instance *instance, const char *file);
 void update_first_instance(struct buffer_instance *instance, int topt);
 
 void show_instance_file(struct buffer_instance *instance, const char *name);
+
 int count_cpus(void);
+
+/* No longer in event-utils.h */
+void __noreturn die(const char *fmt, ...); /* Can be overriden */
+void *malloc_or_die(unsigned int size); /* Can be overridden */
+void __noreturn __die(const char *fmt, ...);
+void __noreturn _vdie(const char *fmt, va_list ap);
 
 #endif /* __TRACE_LOCAL_H */

@@ -17,7 +17,7 @@ static struct usage_help usage_help[] = {
 		"record",
 		"record a trace into a trace.dat file",
 		" %s record [-v][-e event [-f filter]][-p plugin][-F][-d][-D][-o file] \\\n"
-		"           [-s usecs][-O option ][-l func][-g func][-n func] \\\n"
+		"           [-q][-s usecs][-O option ][-l func][-g func][-n func] \\\n"
 		"           [-P pid][-N host:port][-t][-r prio][-b size][-B buf][command ...]\n"
 		"           [-m max][-C clock]\n"
 		"          -e run command with event enabled\n"
@@ -26,7 +26,7 @@ static struct usage_help usage_help[] = {
 		"          -p run command with plugin enabled\n"
 		"          -F filter only on the given process\n"
 		"          -P trace the given pid like -F for the command\n"
-		"          -c also trace the childen of -F\n"
+		"          -c also trace the childen of -F (or -P if kernel supports it)\n"
 		"          -C set the trace clock\n"
 		"          -T do a stacktrace on all events\n"
 		"          -l filter function name\n"
@@ -48,10 +48,14 @@ static struct usage_help usage_help[] = {
 		"          -B create sub buffer and folling events will be enabled here\n"
 		"          -k do not reset the buffers after tracing.\n"
 		"          -i do not fail if an event is not found\n"
+		"          -q print no output to the screen\n"
+		"          --quiet print no output to the screen\n"
+		"          --module filter module name\n"
 		"          --by-comm used with --profile, merge events for related comms\n"
 		"          --profile enable tracing options needed for report --profile\n"
 		"          --func-stack perform a stack trace for function tracer\n"
 		"             (use with caution)\n"
+		"          --max-graph-depth limit function_graph depth\n"
 	},
 	{
 		"start",
@@ -127,6 +131,11 @@ static struct usage_help usage_help[] = {
 		"          -t reset the top level instance (useful with -B or -a)\n"
 	},
 	{
+		"clear",
+		"clear the trace buffers",
+		" %s clear\n"
+	},
+	{
 		"report",
 		"read out the trace stored in a trace.dat file",
 		" %s report [-i file] [--cpu cpu] [-e][-f][-l][-P][-L][-N][-R][-E]\\\n"
@@ -139,6 +148,8 @@ static struct usage_help usage_help[] = {
 		"          -P show printk list\n"
 		"          -E show event files stored\n"
 		"          -F filter to filter output on\n"
+		"          -I filter out events with the HARDIRQ flag set\n"
+		"          -S filter out events with the SOFTIRQ flag set\n"
 		"          -t print out full timestamp. Do not truncate to 6 places.\n"
 		"          -R raw format: ignore print format and only show field data\n"
 		"          -r raw format the events that match the option\n"
@@ -159,6 +170,13 @@ static struct usage_help usage_help[] = {
 		"          -H Allows users to hook two events together for timings\n"
 		"             (used with --profile)\n"
 		"          --by-comm used with --profile, merge events for related comms\n"
+		"          --ts-offset will add amount to timestamp of all events of the\n"
+		"                     previous data file.\n"
+		"          --ts2secs HZ, pass in the timestamp frequency (per second)\n"
+		"                     to convert the displayed timestamps to seconds\n"
+		"                     Affects the previous data file, unless there was no\n"
+		"                     previous data file, in which case it becomes default\n"
+		"           --ts-diff Show the delta timestamp between events.\n"
 	},
 	{
 		"stream",
@@ -216,7 +234,7 @@ static struct usage_help usage_help[] = {
 		"          -D create it in daemon mode.\n"
 		"          -o file name to use for clients.\n"
 		"          -d diretory to store client files.\n"
-		"	   -l logfile to write messages to.\n"
+		"          -l logfile to write messages to.\n"
 	},
 	{
 		"list",
@@ -316,4 +334,10 @@ void usage(char **argv)
  out:
 	printf("\n");
 	exit(-1);
+}
+
+
+void trace_usage(int argc, char **argv)
+{
+	usage(argv);
 }

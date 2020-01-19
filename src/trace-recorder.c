@@ -34,6 +34,12 @@
 #include <errno.h>
 
 #include "trace-cmd.h"
+#include "event-utils.h"
+
+/* F_GETPIPE_SZ was introduced in 2.6.35, older systems don't have it */
+#ifndef F_GETPIPE_SZ
+# define F_GETPIPE_SZ	1032 /* The Linux number for the option */
+#endif
 
 struct tracecmd_recorder {
 	int		fd;
@@ -41,6 +47,7 @@ struct tracecmd_recorder {
 	int		fd2;
 	int		trace_fd;
 	int		brass[2];
+	int		pipe_size;
 	int		page_size;
 	int		cpu;
 	int		stop;
@@ -114,9 +121,10 @@ tracecmd_create_buffer_recorder_fd2(int fd, int fd2, int cpu, unsigned flags,
 {
 	struct tracecmd_recorder *recorder;
 	char *path = NULL;
+	int pipe_size = 0;
 	int ret;
 
-	recorder = malloc_or_die(sizeof(*recorder));
+	recorder = malloc(sizeof(*recorder));
 	if (!recorder)
 		return NULL;
 
@@ -155,25 +163,36 @@ tracecmd_create_buffer_recorder_fd2(int fd, int fd2, int cpu, unsigned flags,
 	recorder->fd1 = fd;
 	recorder->fd2 = fd2;
 
-	path = malloc_or_die(strlen(buffer) + 40);
-	if (!path)
+	if (flags & TRACECMD_RECORD_SNAPSHOT)
+		ret = asprintf(&path, "%s/per_cpu/cpu%d/snapshot_raw", buffer, cpu);
+	else
+		ret = asprintf(&path, "%s/per_cpu/cpu%d/trace_pipe_raw", buffer, cpu);
+	if (ret < 0)
 		goto out_free;
 
-	if (flags & TRACECMD_RECORD_SNAPSHOT)
-		sprintf(path, "%s/per_cpu/cpu%d/snapshot_raw", buffer, cpu);
-	else
-		sprintf(path, "%s/per_cpu/cpu%d/trace_pipe_raw", buffer, cpu);
 	recorder->trace_fd = open(path, O_RDONLY);
 	if (recorder->trace_fd < 0)
 		goto out_free;
-
-	free(path);
 
 	if ((recorder->flags & TRACECMD_RECORD_NOSPLICE) == 0) {
 		ret = pipe(recorder->brass);
 		if (ret < 0)
 			goto out_free;
+
+		ret = fcntl(recorder->brass[0], F_GETPIPE_SZ, &pipe_size);
+		/*
+		 * F_GETPIPE_SZ was introduced in 2.6.35, ftrace was introduced
+		 * in 2.6.31. If we are running on an older kernel, just fall
+		 * back to using page_size for splice(). It could also return
+		 * success, but not modify pipe_size.
+		 */
+		if (ret < 0 || !pipe_size)
+			pipe_size = recorder->page_size;
+
+		recorder->pipe_size = pipe_size;
 	}
+
+	free(path);
 
 	return recorder;
 
@@ -334,32 +353,38 @@ static inline void update_fd(struct tracecmd_recorder *recorder, int size)
  */
 static long splice_data(struct tracecmd_recorder *recorder)
 {
+	long total_read = 0;
+	long read;
 	long ret;
 
-	ret = splice(recorder->trace_fd, NULL, recorder->brass[1], NULL,
-		     recorder->page_size, 1 /* SPLICE_F_MOVE */);
-	if (ret < 0) {
+	read = splice(recorder->trace_fd, NULL, recorder->brass[1], NULL,
+		      recorder->pipe_size, 1 /* SPLICE_F_MOVE */);
+	if (read < 0) {
 		if (errno != EAGAIN && errno != EINTR) {
 			warning("recorder error in splice input");
 			return -1;
 		}
-		if (errno == EINTR)
-			return 0;
-	} else if (ret == 0)
+		return 0;
+	} else if (read == 0)
 		return 0;
 
+ again:
 	ret = splice(recorder->brass[0], NULL, recorder->fd, NULL,
-		     recorder->page_size, recorder->fd_flags);
+		     read, recorder->fd_flags);
 	if (ret < 0) {
 		if (errno != EAGAIN && errno != EINTR) {
 			warning("recorder error in splice output");
 			return -1;
 		}
-		ret = 0;
+		return total_read;
 	} else
 		update_fd(recorder, ret);
+	total_read = ret;
+	read -= ret;
+	if (read)
+		goto again;
 
-	return ret;
+	return total_read;
 }
 
 /*
@@ -369,22 +394,31 @@ static long splice_data(struct tracecmd_recorder *recorder)
 static long read_data(struct tracecmd_recorder *recorder)
 {
 	char buf[recorder->page_size];
-	long ret;
+	long left;
+	long r, w;
 
-	ret = read(recorder->trace_fd, buf, recorder->page_size);
-	if (ret < 0) {
+	r = read(recorder->trace_fd, buf, recorder->page_size);
+	if (r < 0) {
 		if (errno != EAGAIN && errno != EINTR) {
 			warning("recorder error in read output");
 			return -1;
 		}
-		ret = 0;
-	}
-	if (ret > 0) {
-		write(recorder->fd, buf, ret);
-		update_fd(recorder, ret);
+		return 0;
 	}
 
-	return ret;
+	left = r;
+	do {
+		w = write(recorder->fd, buf + (r - left), left);
+		if (w > 0) {
+			left -= w;
+			update_fd(recorder, w);
+		}
+	} while (w >= 0 && left);
+
+	if (w < 0)
+		r = w;
+
+	return r;
 }
 
 static void set_nonblock(struct tracecmd_recorder *recorder)

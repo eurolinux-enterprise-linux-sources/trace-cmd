@@ -18,6 +18,7 @@
  * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
  */
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
 #include <fcntl.h>
@@ -29,12 +30,15 @@
 #include <errno.h>
 #include <getopt.h>
 #include <libgen.h>
+#include <dlfcn.h>
 
 #include "trace-compat.h"
 #include "trace-capture.h"
 #include "trace-cmd.h"
+#include "trace-local.h"
 #include "trace-gui.h"
 #include "kernel-shark.h"
+#include "kshark-plugin.h"
 #include "event-utils.h"
 #include "version.h"
 
@@ -58,8 +62,10 @@
 #define default_input_file "trace.dat"
 static char *input_file;
 
-void usage(char *prog)
+void usage(char **argv)
 {
+	char *prog = basename(argv[0]);
+
 	printf("Usage: %s\n", prog);
 	printf("  -h	Display this help message\n");
 	printf("  -v	Display version and exit\n");
@@ -221,10 +227,13 @@ static void update_title(GtkWidget *window, const gchar *file)
 {
 	GString *gstr;
 	gchar *str;
+	gchar *gfile;
 
+	gfile = g_strdup(file);
 	gstr = g_string_new("kernelshark");
-	g_string_append_printf(gstr, "(%s)", basename(file));
+	g_string_append_printf(gstr, "(%s)", basename(gfile));
 	str = g_string_free(gstr, FALSE);
+	g_free(gfile);
 
 	gtk_window_set_title(GTK_WINDOW(window), str);
 	g_free(str);
@@ -743,7 +752,6 @@ sync_task_filter_clicked (GtkWidget *subitem, gpointer data)
 	struct filter_task *hide_tasks;
 	GtkTreeView *trace_tree = GTK_TREE_VIEW(info->treeview);
 	GtkTreeModel *model;
-	TraceViewStore *store;
 	gboolean keep;
 	gchar *selections[] = { "Sync List Filter with Graph Filter",
 				"Sync Graph Filter with List Filter",
@@ -760,8 +768,6 @@ sync_task_filter_clicked (GtkWidget *subitem, gpointer data)
 	model = gtk_tree_view_get_model(trace_tree);
 	if (!model)
 		return;
-
-	store = TRACE_VIEW_STORE(model);
 
 	/* If they are already equal, then just perminently sync them */
 	if (filter_task_compare(info->ginfo->task_filter,
@@ -894,7 +900,6 @@ __update_list_task_filter_callback(struct shark_info *info,
 {
 	GtkTreeView *trace_tree = GTK_TREE_VIEW(info->treeview);
 	GtkTreeModel *model;
-	TraceViewStore *store;
 	int i;
 
 	if (!accept)
@@ -903,8 +908,6 @@ __update_list_task_filter_callback(struct shark_info *info,
 	model = gtk_tree_view_get_model(trace_tree);
 	if (!model)
 		return;
-
-	store = TRACE_VIEW_STORE(model);
 
 	filter_task_clear(task_filter);
 
@@ -955,7 +958,6 @@ __list_tasks_clicked (struct shark_info *info,
 	GtkTreeView *trace_tree = GTK_TREE_VIEW(info->treeview);
 	struct graph_info *ginfo = info->ginfo;
 	GtkTreeModel *model;
-	TraceViewStore *store;
 	gint *selected;
 	gint *tasks;
 
@@ -965,8 +967,6 @@ __list_tasks_clicked (struct shark_info *info,
 	model = gtk_tree_view_get_model(trace_tree);
 	if (!model)
 		return;
-
-	store = TRACE_VIEW_STORE(model);
 
 	tasks = trace_graph_task_list(ginfo);
 	selected = filter_task_pids(task_filter);
@@ -1451,6 +1451,49 @@ filter_hide_task_clicked (gpointer data)
 }
 
 static void
+handle_display_event_clicked (gpointer data, gboolean raw)
+{
+	struct shark_info *info = data;
+	struct pevent_record *record;
+	struct pevent *pevent;
+	TraceViewRecord *vrec;
+	GtkTreeModel *model;
+	guint64 offset;
+	gint row;
+	gint cpu;
+
+	row = trace_view_get_selected_row(GTK_WIDGET(info->treeview));
+	if (row < 0)
+		return;
+
+	model = gtk_tree_view_get_model(GTK_TREE_VIEW(info->treeview));
+	vrec = trace_view_store_get_row(TRACE_VIEW_STORE(model), row);
+	offset = vrec->offset;
+
+	record = tracecmd_read_at(info->handle, offset, &cpu);
+	if (!record)
+		return;
+
+	pevent = tracecmd_get_pevent(info->handle);
+	trace_show_record_dialog(GTK_WINDOW(info->window),
+				 pevent, record, raw);
+
+	free_record(record);
+}
+
+static void
+display_event_clicked (gpointer data)
+{
+	handle_display_event_clicked(data, FALSE);
+}
+
+static void
+display_raw_event_clicked (gpointer data)
+{
+	handle_display_event_clicked(data, TRUE);
+}
+
+static void
 filter_graph_hide_task_clicked (gpointer data)
 {
 	struct shark_info *info = data;
@@ -1516,12 +1559,13 @@ do_tree_popup(GtkWidget *widget, GdkEventButton *event, gpointer data)
 	static GtkWidget *menu_filter_graph_add_task;
 	static GtkWidget *menu_filter_graph_hide_task;
 	static GtkWidget *menu_filter_graph_clear_tasks;
+	static GtkWidget *menu_display_event;
+	static GtkWidget *menu_display_raw_event;
 	struct pevent_record *record;
 	TraceViewRecord *vrec;
 	GtkTreeModel *model;
 	const char *comm;
 	gint pid;
-	gint len;
 	guint64 offset;
 	gint row;
 	gint cpu;
@@ -1593,6 +1637,21 @@ do_tree_popup(GtkWidget *widget, GdkEventButton *event, gpointer data)
 					  G_CALLBACK (filter_graph_clear_tasks_clicked),
 					  data);
 
+		menu_display_event = gtk_menu_item_new_with_label("Display event");
+		gtk_widget_show(menu_display_event);
+		gtk_menu_shell_append(GTK_MENU_SHELL (menu), menu_display_event);
+
+		g_signal_connect_swapped (G_OBJECT (menu_display_event), "activate",
+					  G_CALLBACK (display_event_clicked),
+					  data);
+
+		menu_display_raw_event = gtk_menu_item_new_with_label("Display raw event");
+		gtk_widget_show(menu_display_raw_event);
+		gtk_menu_shell_append(GTK_MENU_SHELL (menu), menu_display_raw_event);
+
+		g_signal_connect_swapped (G_OBJECT (menu_display_raw_event), "activate",
+					  G_CALLBACK (display_raw_event_clicked),
+					  data);
 	}
 
 	row = trace_view_get_selected_row(GTK_WIDGET(info->treeview));
@@ -1607,8 +1666,6 @@ do_tree_popup(GtkWidget *widget, GdkEventButton *event, gpointer data)
 		if (record) {
 			pid = pevent_data_pid(ginfo->pevent, record);
 			comm = pevent_data_comm_from_pid(ginfo->pevent, pid);
-
-			len = strlen(comm) + 50;
 
 			if (info->sync_task_filters) {
 				if (trace_graph_filter_task_find_pid(ginfo, pid))
@@ -1667,6 +1724,8 @@ do_tree_popup(GtkWidget *widget, GdkEventButton *event, gpointer data)
 
 			gtk_widget_show(menu_filter_add_task);
 			gtk_widget_show(menu_filter_hide_task);
+			gtk_widget_show(menu_display_event);
+			gtk_widget_show(menu_display_raw_event);
 			free_record(record);
 		}
 	} else {
@@ -1674,6 +1733,8 @@ do_tree_popup(GtkWidget *widget, GdkEventButton *event, gpointer data)
 		gtk_widget_hide(menu_filter_hide_task);
 		gtk_widget_hide(menu_filter_graph_add_task);
 		gtk_widget_hide(menu_filter_graph_hide_task);
+		gtk_widget_hide(menu_display_event);
+		gtk_widget_hide(menu_display_raw_event);
 	}
 
 	if (ginfo->filter_enabled)
@@ -1744,6 +1805,57 @@ button_press_event(GtkWidget *widget, GdkEventButton *event, gpointer data)
 	return FALSE;
 }
 
+static struct plugin_list {
+	struct plugin_list		*next;
+	const char			*file;
+} *plugins;
+static struct plugin_list **plugin_next = &plugins;
+
+static void add_plugin(const char *file)
+{
+	struct stat st;
+	int ret;
+
+	ret = stat(file, &st);
+	if (ret < 0) {
+		warning("plugin %s not found", file);
+		return;
+	}
+
+	*plugin_next = calloc(sizeof(struct plugin_list), 1);
+	if (!*plugin_next)
+		die("failed to allocat memory for plugin");
+
+	(*plugin_next)->file = file;
+	plugin_next = &(*plugin_next)->next;
+}
+
+static void handle_plugins(struct shark_info *info)
+{
+	kshark_plugin_load_func func;
+	struct plugin_list *plugin;
+	void *handle;
+
+	while ((plugin = plugins)) {
+		plugins = plugin->next;
+
+		handle = dlopen(plugin->file, RTLD_NOW | RTLD_GLOBAL);
+		free(plugin);
+		if (!handle) {
+			warning("cound not load plugin '%s'\n%s\n",
+				plugin->file, dlerror());
+			continue;
+		}
+		func = dlsym(handle, KSHARK_PLUGIN_LOADER_NAME);
+		if (!func) {
+			warning("cound not find func '%s' in plugin '%s'\n%s\n",
+				KSHARK_PLUGIN_LOADER_NAME, plugin->file, dlerror());
+			continue;
+		}
+		func(info);
+	}
+}
+
 static void sig_end(int sig)
 {
 	fprintf(stderr, "kernelshark: Received SIGINT\n");
@@ -1773,15 +1885,17 @@ void kernel_shark(int argc, char **argv)
 	int ret;
 	int c;
 
+#if !GLIB_CHECK_VERSION(2, 32, 0)
 	g_thread_init(NULL);
+#endif
 	gdk_threads_init();
 
 	gtk_init(&argc, &argv);
 
-	while ((c = getopt(argc, argv, "hvi:")) != -1) {
+	while ((c = getopt(argc, argv, "hvi:p:")) != -1) {
 		switch(c) {
 		case 'h':
-			usage(basename(argv[0]));
+			usage(argv);
 			return;
 		case 'v':
 			printf("%s - %s\n",
@@ -1791,6 +1905,9 @@ void kernel_shark(int argc, char **argv)
 		case 'i':
 			input_file = optarg;
 			break;
+		case 'p':
+			add_plugin(optarg);
+			break;
 		default:
 			/* assume the other options are for gtk */
 			break;
@@ -1799,7 +1916,7 @@ void kernel_shark(int argc, char **argv)
 
 	if ((argc - optind) >= 1) {
 		if (input_file)
-			usage(basename(argv[0]));
+			usage(argv);
 		input_file = argv[optind];
 	}
 
@@ -2378,9 +2495,19 @@ void kernel_shark(int argc, char **argv)
 
 	gtk_widget_set_size_request(window, TRACE_WIDTH, TRACE_HEIGHT);
 
+	handle_plugins(info);
+
 	gdk_threads_enter();
+
+	/*
+	 * The showing of the window will configure the graph and it will
+	 * waste time drawing the events. But after the window appears and
+	 * a border is displayed, the graph gets shown again.
+	 */
+	info->ginfo->no_draw = TRUE;
 	gtk_widget_show (window);
 
+	info->ginfo->no_draw = FALSE;
 	gtk_main ();
 	gdk_threads_leave();
 }

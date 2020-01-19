@@ -70,15 +70,16 @@ char *strstrip(char *str)
 	return s;
 }
 
+/* FIXME: append_file() is duplicated and could be consolidated */
 char *append_file(const char *dir, const char *name)
 {
 	char *file;
+	int ret;
 
-	file = malloc_or_die(strlen(dir) + strlen(name) + 2);
-	if (!file)
-		die("malloc");
+	ret = asprintf(&file, "%s/%s", dir, name);
+	if (ret < 0)
+		die("Failed to allocate %s/%s", dir, name);
 
-	sprintf(file, "%s/%s", dir, name);
 	return file;
 }
 
@@ -158,7 +159,9 @@ struct event_iter *trace_event_iter_alloc(const char *path)
 {
 	struct event_iter *iter;
 
-	iter = malloc_or_die(sizeof(*iter));
+	iter = malloc(sizeof(*iter));
+	if (!iter)
+		die("Failed to allocate event_iter for path %s", path);
 	memset(iter, 0, sizeof(*iter));
 
 	iter->system_dir = opendir(path);
@@ -890,6 +893,7 @@ void trace_stat (int argc, char **argv)
 {
 	struct buffer_instance *instance = &top_instance;
 	int topt = 0;
+	int status;
 	int c;
 
 	for (;;) {
@@ -902,7 +906,9 @@ void trace_stat (int argc, char **argv)
 			break;
 		case 'B':
 			instance = create_instance(optarg);
-			add_instance(instance);
+			if (!instance)
+				die("Failed to create instance");
+			add_instance(instance, count_cpus());
 			/* top instance requires direct access */
 			if (!topt && is_top_instance(first_instance))
 				first_instance = instance;
@@ -921,6 +927,13 @@ void trace_stat (int argc, char **argv)
 
 	for_all_instances(instance) {
 		stat_instance(instance);
+	}
+
+	if (tracecmd_stack_tracer_status(&status) >= 0) {
+		if (status > 0)
+			printf("Stack tracing is enabled\n\n");
+	} else {
+		printf("Error reading stack tracer status\n\n");
 	}
 
 	exit(0);

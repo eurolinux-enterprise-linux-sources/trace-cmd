@@ -72,8 +72,11 @@ static struct list_head handle_list;
 struct input_files {
 	struct list_head	list;
 	const char		*file;
+	unsigned long long	tsoffset;
+	unsigned long long	ts2secs;
 };
 static struct list_head input_files;
+static struct input_files *last_input_file;
 
 struct pid_list {
 	struct pid_list		*next;
@@ -104,7 +107,11 @@ static int stacktrace_id;
 static int profile;
 
 static int buffer_breaks = 0;
-static int debug = 0;
+
+static int no_irqs;
+static int no_softirqs;
+
+static int tsdiff;
 
 static struct format_field *wakeup_task;
 static struct format_field *wakeup_success;
@@ -284,16 +291,22 @@ static void add_input(const char *file)
 {
 	struct input_files *item;
 
-	item = malloc_or_die(sizeof(*item));
+	item = malloc(sizeof(*item));
+	if (!item)
+		die("Failed to allocate for %s", file);
+	memset(item, 0, sizeof(*item));
 	item->file = file;
 	list_add_tail(&item->list, &input_files);
+	last_input_file = item;
 }
 
 static void add_handle(struct tracecmd_input *handle, const char *file)
 {
 	struct handle_list *item;
 
-	item = malloc_or_die(sizeof(*item));
+	item = malloc(sizeof(*item));
+	if (!item)
+		die("Failed ot allocate for %s", file);
 	memset(item, 0, sizeof(*item));
 	item->handle = handle;
 	if (file) {
@@ -334,7 +347,9 @@ static void add_filter(const char *filter, int neg)
 {
 	struct filter_str *ftr;
 
-	ftr = malloc_or_die(sizeof(*ftr));
+	ftr = malloc(sizeof(*ftr));
+	if (!ftr)
+		die("Failed to allocate for filter %s", filter);
 	ftr->filter = strdup(filter);
 	if (!ftr->filter)
 		die("malloc");
@@ -359,7 +374,9 @@ static void __add_filter(struct pid_list **head, const char *arg)
 
 	pid = strtok_r(pids, ",", &sav);
 	while (pid) {
-		list = malloc_or_die(sizeof(*list));
+		list = malloc(sizeof(*list));
+		if (!list)
+			die("Failed to allocate for arg %s", arg);
 		list->pid = pid;
 		list->free = free;
 		list->next = *head;
@@ -397,7 +414,9 @@ static char *append_pid_filter(char *curr_filter, char *pid)
 #define __STR "%s"
 
 	if (!curr_filter) {
-		filter = malloc_or_die(len);
+		filter = malloc(len);
+		if (!filter)
+			die("Failed to allocate for filter %s", curr_filter);
 		sprintf(filter, ".*:" FILTER_FMT, pid, pid, pid);
 	} else {
 
@@ -493,7 +512,9 @@ static void process_filters(struct handle_list *handles)
 		filter = filter_strings;
 		filter_strings = filter->next;
 
-		event_filter = malloc_or_die(sizeof(*event_filter));
+		event_filter = malloc(sizeof(*event_filter));
+		if (!event_filter)
+			die("Failed to allocate for event filter");
 		event_filter->next = NULL;
 		event_filter->filter = pevent_filter_alloc(pevent);
 		if (!event_filter->filter)
@@ -586,8 +607,10 @@ static void add_wakeup(unsigned int val, unsigned long long start)
 		return;
 	}
 
-	info = malloc_or_die(sizeof(*info));
-	info->hash.key = val;
+	info = malloc(sizeof(*info));
+	if (!info)
+		die("Failed to allocate wakeup info");
+	info->hash.key = key;
 	info->start = start;
 	trace_hash_add(&wakeup_hash, &info->hash);
 }
@@ -739,22 +762,28 @@ static void finish_wakeup(void)
 	trace_hash_free(&wakeup_hash);
 }
 
-void trace_show_data(struct tracecmd_input *handle, struct pevent_record *record,
-		     int profile)
+void trace_show_data(struct tracecmd_input *handle, struct pevent_record *record)
 {
+	tracecmd_show_data_func func = tracecmd_get_show_data_func(handle);
 	struct pevent *pevent;
 	struct trace_seq s;
 	int cpu = record->cpu;
 	bool use_trace_clock;
+	static unsigned long long last_ts;
+	unsigned long long diff_ts;
+	unsigned long page_size;
+	char buf[50];
 
-	pevent = tracecmd_get_pevent(handle);
+	page_size = tracecmd_page_size(handle);
 
 	test_save(record, cpu);
 
-	if (profile) {
-		trace_profile_record(handle, record, cpu);
+	if (func) {
+		func(handle, record);
 		return;
 	}
+
+	pevent = tracecmd_get_pevent(handle);
 
 	trace_seq_init(&s);
 	if (record->missed_events > 0)
@@ -766,13 +795,34 @@ void trace_show_data(struct tracecmd_input *handle, struct pevent_record *record
 		if (tracecmd_record_at_buffer_start(handle, record)) {
 			trace_seq_printf(&s, "CPU:%d [SUBBUFFER START]", cpu);
 			if (debug)
-				trace_seq_printf(&s, " [%lld]",
-						 tracecmd_page_ts(handle, record));
+				trace_seq_printf(&s, " [%lld:0x%llx]",
+						 tracecmd_page_ts(handle, record),
+						 record->offset & ~(page_size - 1));
 			trace_seq_putc(&s, '\n');
 		}
 	}
 	use_trace_clock = tracecmd_get_use_trace_clock(handle);
-	pevent_print_event(pevent, &s, record, use_trace_clock);
+	if (tsdiff) {
+		struct event_format *event;
+		unsigned long long rec_ts = record->ts;
+
+		event = pevent_find_event_by_record(pevent, record);
+		pevent_print_event_task(pevent, &s, event, record);
+		pevent_print_event_time(pevent, &s, event, record,
+					use_trace_clock);
+		buf[0] = 0;
+		if (use_trace_clock && !(pevent->flags & PEVENT_NSEC_OUTPUT))
+			rec_ts = (rec_ts + 500) / 1000;
+		if (last_ts) {
+			diff_ts = rec_ts - last_ts;
+			snprintf(buf, 50, "(+%lld)", diff_ts);
+			buf[49] = 0;
+		}
+		last_ts = rec_ts;
+		trace_seq_printf(&s, " %-8s", buf);
+		pevent_print_event_data(pevent, &s, event, record);
+	} else
+		pevent_print_event(pevent, &s, record, use_trace_clock);
 	if (s.len && *(s.buffer + s.len - 1) == '\n')
 		s.len--;
 	if (debug) {
@@ -781,8 +831,9 @@ void trace_show_data(struct tracecmd_input *handle, struct pevent_record *record
 		void *page;
 		void *offset;
 
-		trace_seq_printf(&s, " [%d]",
-				 tracecmd_record_ts_delta(handle, record));
+		trace_seq_printf(&s, " [%d:0x%llx:%d]",
+				 tracecmd_record_ts_delta(handle, record),
+				 record->offset & (page_size - 1), record->size);
 		kbuf = tracecmd_record_kbuf(handle, record);
 		page = tracecmd_record_page(handle, record);
 		offset = tracecmd_record_offset(handle, record);
@@ -813,7 +864,7 @@ void trace_show_data(struct tracecmd_input *handle, struct pevent_record *record
 			}
 		}
 	}
-		
+
 	trace_seq_do_printf(&s);
 	trace_seq_destroy(&s);
 
@@ -837,10 +888,20 @@ static void read_rest(void)
 }
 
 static int
-test_filters(struct filter *event_filters, struct pevent_record *record, int neg)
+test_filters(struct pevent *pevent, struct filter *event_filters,
+	     struct pevent_record *record, int neg)
 {
 	int found = 0;
 	int ret = FILTER_NONE;
+	int flags;
+
+	if (no_irqs || no_softirqs) {
+		flags = pevent_data_flags(pevent, record);
+		if (no_irqs && (flags & TRACE_FLAG_HARDIRQ))
+			return FILTER_MISS;
+		if (no_softirqs && (flags & TRACE_FLAG_SOFTIRQ))
+			return FILTER_MISS;
+	}
 
 	while (event_filters) {
 		ret = pevent_filter_match(event_filters->filter, record);
@@ -890,11 +951,15 @@ test_stacktrace(struct handle_list *handles, struct pevent_record *record,
 		init = 1;
 
 		list_for_each_entry(h, &handle_list, list) {
-			info = malloc_or_die(sizeof(*info));
+			info = malloc(sizeof(*info));
+			if (!info)
+				die("Failed to allocate handle");
 			info->handles = h;
 			info->nr_cpus = tracecmd_cpus(h->handle);
 
-			info->cpus = malloc_or_die(sizeof(*info->cpus) * info->nr_cpus);
+			info->cpus = malloc(sizeof(*info->cpus) * info->nr_cpus);
+			if (!info->cpus)
+				die("Failed to allocate for %d cpus", info->nr_cpus);
 			memset(info->cpus, 0, sizeof(*info->cpus));
 
 			pevent = tracecmd_get_pevent(h->handle);
@@ -932,7 +997,7 @@ test_stacktrace(struct handle_list *handles, struct pevent_record *record,
 	 * being filtered out.
 	 */
 	if (id == info->stacktrace_id) {
-		ret = test_filters(handles->event_filter_out, record, 1);
+		ret = test_filters(pevent, handles->event_filter_out, record, 1);
 		if (ret != FILTER_MATCH)
 			return cpu_info->last_printed;
 		return 0;
@@ -945,6 +1010,7 @@ test_stacktrace(struct handle_list *handles, struct pevent_record *record,
 static struct pevent_record *get_next_record(struct handle_list *handles)
 {
 	struct pevent_record *record;
+	struct pevent *pevent;
 	int found = 0;
 	int cpu;
 	int ret;
@@ -954,6 +1020,8 @@ static struct pevent_record *get_next_record(struct handle_list *handles)
 
 	if (handles->done)
 		return NULL;
+
+	pevent = tracecmd_get_pevent(handles->handle);
 
 	do {
 		if (filter_cpus) {
@@ -980,7 +1048,7 @@ static struct pevent_record *get_next_record(struct handle_list *handles)
 			record = tracecmd_read_next_data(handles->handle, &cpu);
 
 		if (record) {
-			ret = test_filters(handles->event_filters, record, 0);
+			ret = test_filters(pevent, handles->event_filters, record, 0);
 			switch (ret) {
 			case FILTER_NOEXIST:
 				/* Stack traces may still filter this */
@@ -993,7 +1061,8 @@ static struct pevent_record *get_next_record(struct handle_list *handles)
 			case FILTER_NONE:
 			case FILTER_MATCH:
 				/* Test the negative filters (-v) */
-				ret = test_filters(handles->event_filter_out, record, 1);
+				ret = test_filters(pevent, handles->event_filter_out,
+						   record, 1);
 				if (ret != FILTER_MATCH) {
 					found = 1;
 					break;
@@ -1114,7 +1183,8 @@ static void read_data_info(struct list_head *handle_list, enum output_type otype
 			last_hook->next = tracecmd_hooks(handles->handle);
 		else
 			hooks = tracecmd_hooks(handles->handle);
-		trace_init_profile(handles->handle, hooks, global);
+		if (profile)
+			trace_init_profile(handles->handle, hooks, global);
 
 		process_filters(handles);
 
@@ -1156,13 +1226,13 @@ static void read_data_info(struct list_head *handle_list, enum output_type otype
 		}
 		if (last_record) {
 			print_handle_file(last_handle);
-			trace_show_data(last_handle->handle, last_record, profile);
+			trace_show_data(last_handle->handle, last_record);
 			free_handle_record(last_handle);
 		}
 	} while (last_record);
 
 	if (profile)
-		trace_profile();
+		do_trace_profile();
 
 	list_for_each_entry(handles, handle_list, list) {
 		free_filters(handles->event_filters);
@@ -1254,10 +1324,12 @@ static void add_functions(struct pevent *pevent, const char *file)
 	if (ret < 0)
 		die("Can't stat file %s", file);
 
-	buf = malloc_or_die(st.st_size);
+	buf = malloc(st.st_size);
+	if (!buf)
+		die("Failed to allocate for function buffer");
 	read_file_fd(fd, buf, st.st_size);
 	close(fd);
-	parse_proc_kallsyms(pevent, buf, st.st_size);
+	tracecmd_parse_proc_kallsyms(pevent, buf, st.st_size);
 	free(buf);
 }
 
@@ -1292,7 +1364,9 @@ static void set_event_flags(struct pevent *pevent, struct event_str *list,
 	for (str = list; str; str = str->next) {
 		char *match;
 
-		match = malloc_or_die(strlen(str->event) + 3);
+		match = malloc(strlen(str->event) + 3);
+		if (!match)
+			die("Failed to allocate for match string '%s'", str->event);
 		sprintf(match, "^%s$", str->event);
 
 		ret = regcomp(&regex, match, REG_ICASE|REG_NOSUB);
@@ -1321,6 +1395,9 @@ static void add_hook(const char *arg)
 }
 
 enum {
+	OPT_tsdiff	= 239,
+	OPT_ts2secs	= 240,
+	OPT_tsoffset	= 241,
 	OPT_bycomm	= 242,
 	OPT_debug	= 243,
 	OPT_uname	= 244,
@@ -1350,6 +1427,9 @@ void trace_report (int argc, char **argv)
 	struct input_files *inputs;
 	struct handle_list *handles;
 	enum output_type otype;
+	unsigned long long tsoffset = 0;
+	unsigned long long ts2secs = 0;
+	unsigned long long ts2sc;
 	int show_stat = 0;
 	int show_funcs = 0;
 	int show_endian = 0;
@@ -1399,11 +1479,14 @@ void trace_report (int argc, char **argv)
 			{"profile", no_argument, NULL, OPT_profile},
 			{"uname", no_argument, NULL, OPT_uname},
 			{"by-comm", no_argument, NULL, OPT_bycomm},
+			{"ts-offset", required_argument, NULL, OPT_tsoffset},
+			{"ts2secs", required_argument, NULL, OPT_ts2secs},
+			{"ts-diff", no_argument, NULL, OPT_tsdiff},
 			{"help", no_argument, NULL, '?'},
 			{NULL, 0, NULL, 0}
 		};
 
-		c = getopt_long (argc-1, argv+1, "+hi:H:feGpRr:tPNn:LlEwF:VvTqO:",
+		c = getopt_long (argc-1, argv+1, "+hSIi:H:feGpRr:tPNn:LlEwF:VvTqO:",
 			long_options, &option_index);
 		if (c == -1)
 			break;
@@ -1413,8 +1496,11 @@ void trace_report (int argc, char **argv)
 			break;
 		case 'i':
 			if (input_file) {
-				if (!multi_inputs)
+				if (!multi_inputs) {
 					add_input(input_file);
+					if (tsoffset)
+						last_input_file->tsoffset = tsoffset;
+				}
 				multi_inputs++;
 				add_input(optarg);
 			} else
@@ -1432,6 +1518,12 @@ void trace_report (int argc, char **argv)
 		case 'f':
 			show_funcs = 1;
 			break;
+		case 'I':
+			no_irqs = 1;
+			break;
+		case 'S':
+			no_softirqs = 1;
+			break;
 		case 'P':
 			show_printk = 1;
 			break;
@@ -1442,7 +1534,9 @@ void trace_report (int argc, char **argv)
 			tracecmd_disable_plugins = 1;
 			break;
 		case 'n':
-			*nohandler_ptr = malloc_or_die(sizeof(struct event_str));
+			*nohandler_ptr = malloc(sizeof(struct event_str));
+			if (!*nohandler_ptr)
+				die("Failed to allocate for '-n %s'", optarg);
 			(*nohandler_ptr)->event = optarg;
 			(*nohandler_ptr)->next = NULL;
 			nohandler_ptr = &(*nohandler_ptr)->next;
@@ -1463,7 +1557,9 @@ void trace_report (int argc, char **argv)
 			raw = 1;
 			break;
 		case 'r':
-			*raw_ptr = malloc_or_die(sizeof(struct event_str));
+			*raw_ptr = malloc(sizeof(struct event_str));
+			if (!*raw_ptr)
+				die("Failed to allocate '-r %s'", optarg);
 			(*raw_ptr)->event = optarg;
 			(*raw_ptr)->next = NULL;
 			raw_ptr = &(*raw_ptr)->next;
@@ -1535,6 +1631,23 @@ void trace_report (int argc, char **argv)
 		case OPT_bycomm:
 			trace_profile_set_merge_like_comms();
 			break;
+		case OPT_ts2secs:
+			ts2sc = atoll(optarg);
+			if (multi_inputs)
+				last_input_file->ts2secs = ts2sc;
+			else
+				ts2secs = ts2sc;
+			break;
+		case OPT_tsoffset:
+			tsoffset = atoll(optarg);
+			if (multi_inputs)
+				last_input_file->tsoffset = tsoffset;
+			if (!input_file)
+				die("--ts-offset must come after -i");
+			break;
+		case OPT_tsdiff:
+			tsdiff = 1;
+			break;
 		default:
 			usage(argv);
 		}
@@ -1549,9 +1662,11 @@ void trace_report (int argc, char **argv)
 	if (!input_file)
 		input_file = default_input_file;
 
-	if (!multi_inputs)
+	if (!multi_inputs) {
 		add_input(input_file);
-	else if (show_wakeup)
+		if (tsoffset)
+			last_input_file->tsoffset = tsoffset;
+	} else if (show_wakeup)
 		die("Wakeup tracing can only be done on a single input file");
 
 	list_for_each_entry(inputs, &input_files, list) {
@@ -1573,6 +1688,14 @@ void trace_report (int argc, char **argv)
 			       getpagesize());
 			return;
 		}
+
+		if (inputs->tsoffset)
+			tracecmd_set_ts_offset(handle, inputs->tsoffset);
+
+		if (inputs->ts2secs)
+			tracecmd_set_ts2secs(handle, inputs->ts2secs);
+		else if (ts2secs)
+			tracecmd_set_ts2secs(handle, ts2secs);
 
 		pevent = tracecmd_get_pevent(handle);
 

@@ -39,6 +39,14 @@ enum graph_plot_type {
 	PLOT_TYPE_TASK,
 };
 
+enum graph_irq_type {
+	GRAPH_IRQ_NONE,
+	GRAPH_HARDIRQ_ENTRY,
+	GRAPH_HARDIRQ_EXIT,
+	GRAPH_SOFTIRQ_ENTRY,
+	GRAPH_SOFTIRQ_EXIT
+};
+
 struct graph_plot;
 
 struct plot_info {
@@ -50,6 +58,8 @@ struct plot_info {
 	unsigned long long	bstart;
 	unsigned long long	bend;
 	gboolean		bfill;
+	gint			last_box_x;
+	gint			last_line_x;
 };
 
 /*
@@ -101,8 +111,7 @@ struct plot_callbacks {
 		      unsigned long long time);
 	int (*plot_event)(struct graph_info *ginfo,
 			  struct graph_plot *plot,
-			  struct pevent_record *record,
-			  struct plot_info *info);
+			  struct pevent_record *record);
 	void (*end)(struct graph_info *, struct graph_plot *);
 	int (*display_last_event)(struct graph_info *ginfo, struct graph_plot *plot,
 				  struct trace_seq *s, unsigned long long time);
@@ -122,7 +131,8 @@ struct graph_plot {
 	void				*private;
 
 	/* Used for drawing */
-	gint				 last_color;
+	struct plot_info		info;
+	gint				last_color;
 	gint				p1, p2, p3;
 	GdkGC				*gc;
 };
@@ -183,6 +193,8 @@ struct graph_info {
 	guint64			view_end_time;	/* visible end time */
 	gint			start_x;	/* virutal start of visible area */
 
+	gboolean		no_draw;	/* skip drawing the events */
+
 	guint64			cursor;		/* time of cursor (double clicked) */
 
 	gdouble			resolution;	/* pixels / time */
@@ -218,6 +230,10 @@ struct graph_info {
 	gint			event_sched_switch_id;
 	gint			event_wakeup_id;
 	gint			event_wakeup_new_id;
+	gint			*hard_irq_entry_ids;
+	gint			*hard_irq_exit_ids;
+	gint			*soft_irq_entry_ids;
+	gint			*soft_irq_exit_ids;
 	struct format_field	*event_prev_state;
 	struct format_field	*event_pid_field;
 	struct format_field	*event_comm_field;
@@ -227,6 +243,8 @@ struct graph_info {
 	struct format_field	*wakeup_success_field;
 	struct format_field	*wakeup_new_pid_field;
 	struct format_field	*wakeup_new_success_field;
+
+	gboolean		no_irqs;
 
 	gboolean		read_comms;	/* Read all comms on first load */
 
@@ -298,6 +316,8 @@ int trace_graph_check_sched_switch(struct graph_info *ginfo,
 int trace_graph_check_sched_wakeup(struct graph_info *ginfo,
 				   struct pevent_record *record,
 				   gint *pid);
+enum graph_irq_type trace_graph_check_irq(struct graph_info *ginfo,
+		      struct pevent_record *record);
 gboolean trace_graph_filter_on_task(struct graph_info *ginfo, gint pid);
 gboolean trace_graph_filter_on_event(struct graph_info *ginfo, struct pevent_record *record);
 
@@ -362,8 +382,7 @@ void trace_graph_plot_start(struct graph_info *ginfo,
 
 int trace_graph_plot_event(struct graph_info *ginfo,
 			   struct graph_plot *plot,
-			   struct pevent_record *record,
-			   struct plot_info *info);
+			   struct pevent_record *record);
 
 void trace_graph_plot_end(struct graph_info *ginfo,
 			  struct graph_plot *plot);

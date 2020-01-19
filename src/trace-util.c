@@ -27,11 +27,13 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <ctype.h>
+#include <limits.h>
 #include <sys/mount.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 
 #include "trace-cmd.h"
+#include "event-utils.h"
 
 #define LOCAL_PLUGIN_DIR ".trace-cmd/plugins"
 #define TRACEFS_PATH "/sys/kernel/tracing"
@@ -54,10 +56,6 @@ static struct trace_plugin_options {
 
 #define _STR(x) #x
 #define STR(x) _STR(x)
-
-#ifndef MAX_PATH
-# define MAX_PATH 1024
-#endif
 
 struct plugin_list {
 	struct plugin_list	*next;
@@ -87,12 +85,21 @@ char **trace_util_list_plugin_options(void)
 	for (reg = registered_options; reg; reg = reg->next) {
 		for (op = reg->options; op->name; op++) {
 			char *alias = op->plugin_alias ? op->plugin_alias : op->file;
+			int ret;
 
-			name = malloc_or_die(strlen(op->name) + strlen(alias) + 2);
-			sprintf(name, "%s:%s", alias, op->name);
+			ret = asprintf(&name, "%s:%s", alias, op->name);
+			if (ret < 0) {
+				warning("Failed to allocate plugin option %s:%s",
+					alias, op->name);
+				break;
+			}
+
 			list = realloc(list, count + 2);
-			if (!list)
-				die("realloc");
+			if (!list) {
+				warning("Failed to allocate plugin list for %s", name);
+				free(name);
+				break;
+			}
 			list[count++] = name;
 			list[count] = NULL;
 		}
@@ -108,7 +115,7 @@ void trace_util_free_plugin_options_list(char **list)
 }
 
 static int process_option(const char *plugin, const char *option, const char *val);
-static void update_option(const char *file, struct pevent_plugin_option *option);
+static int update_option(const char *file, struct pevent_plugin_option *option);
 
 /**
  * trace_util_add_options - Add a set of options by a plugin
@@ -117,19 +124,25 @@ static void update_option(const char *file, struct pevent_plugin_option *option)
  *
  * Sets the options with the values that have been added by user.
  */
-void trace_util_add_options(const char *name, struct pevent_plugin_option *options)
+int trace_util_add_options(const char *name, struct pevent_plugin_option *options)
 {
 	struct registered_plugin_options *reg;
+	int ret;
 
-	reg = malloc_or_die(sizeof(*reg));
+	reg = malloc(sizeof(*reg));
+	if (!reg)
+		return -ENOMEM;
 	reg->next = registered_options;
 	reg->options = options;
 	registered_options = reg;
 
 	while (options->name) {
-		update_option("ftrace", options);
+		ret = update_option("ftrace", options);
+		if (ret < 0)
+			return ret;
 		options++;
 	}
+	return 0;
 }
 
 /**
@@ -184,7 +197,7 @@ static void parse_option_name(char **option, char **plugin)
 		*p = '\0';
 		*option = strdup(p + 1);
 		if (!*option)
-			die("malloc");
+			return;
 	}
 }
 
@@ -223,7 +236,7 @@ find_registered_option_parse(const char *name)
 
 	option_str = strdup(name);
 	if (!option_str)
-		die("malloc");
+		return NULL;
 
 	parse_option_name(&option_str, &plugin);
 	option = find_registered_option(plugin, option_str);
@@ -265,7 +278,7 @@ const char *trace_util_plugin_option_value(const char *name)
  * is set (note, some options just take a boolean, so @val must be either
  * "1" or "0" or "true" or "false").
  */
-void trace_util_add_option(const char *name, const char *val)
+int trace_util_add_option(const char *name, const char *val)
 {
 	struct trace_plugin_options *op;
 	char *option_str;
@@ -273,7 +286,7 @@ void trace_util_add_option(const char *name, const char *val)
 	
 	option_str = strdup(name);
 	if (!option_str)
-		die("malloc");
+		return -ENOMEM;
 
 	parse_option_name(&option_str, &plugin);
 
@@ -292,7 +305,7 @@ void trace_util_add_option(const char *name, const char *val)
 		if (val) {
 			op->value = strdup(val);
 			if (!op->value)
-				die("malloc");
+				goto out_free;
 		} else
 			op->value = NULL;
 
@@ -307,7 +320,9 @@ void trace_util_add_option(const char *name, const char *val)
 
 	/* If not found, create */
 	if (!op) {
-		op = malloc_or_die(sizeof(*op));
+		op = malloc(sizeof(*op));
+		if (!op)
+			return -ENOMEM;
 		memset(op, 0, sizeof(*op));
 		op->next = trace_plugin_options;
 		trace_plugin_options = op;
@@ -318,18 +333,21 @@ void trace_util_add_option(const char *name, const char *val)
 		if (val) {
 			op->value = strdup(val);
 			if (!op->value)
-				die("malloc");
+				goto out_free;
 		}
 	}
 
-	process_option(plugin, option_str, val);
+	return process_option(plugin, option_str, val);
+ out_free:
+	free(option_str);
+	return -ENOMEM;
 }
 
 static void print_op_data(struct trace_seq *s, const char *name,
 			  const char *op)
 {
-		if (op)
-			trace_seq_printf(s, "%8s:\t%s\n", name, op);
+	if (op)
+		trace_seq_printf(s, "%8s:\t%s\n", name, op);
 }
 
 /**
@@ -359,8 +377,8 @@ void trace_util_print_plugin_options(struct trace_seq *s)
 	}
 }
 
-void parse_cmdlines(struct pevent *pevent,
-		    char *file, int size __maybe_unused)
+void tracecmd_parse_cmdlines(struct pevent *pevent,
+			     char *file, int size __maybe_unused)
 {
 	char *comm;
 	char *line;
@@ -388,8 +406,8 @@ static void extract_trace_clock(struct pevent *pevent, char *line)
 	free(clock);
 }
 
-void parse_trace_clock(struct pevent *pevent,
-			char *file, int size __maybe_unused)
+void tracecmd_parse_trace_clock(struct pevent *pevent,
+				char *file, int size __maybe_unused)
 {
 	char *line;
 	char *next = NULL;
@@ -403,7 +421,7 @@ void parse_trace_clock(struct pevent *pevent,
 	}
 }
 
-void parse_proc_kallsyms(struct pevent *pevent,
+void tracecmd_parse_proc_kallsyms(struct pevent *pevent,
 			 char *file, unsigned int size __maybe_unused)
 {
 	unsigned long long addr;
@@ -434,8 +452,12 @@ void parse_proc_kallsyms(struct pevent *pevent,
 		if (mod)
 			mod[strlen(mod) - 1] = 0;
 
-		/* Hack for arm arch that adds a lot of bogus '$a' functions */
-		if (func[0] != '$')
+		/*
+		 * Hacks for
+		 *  - arm arch that adds a lot of bogus '$a' functions
+		 *  - x86-64 that reports per-cpu variable offsets as absolute
+		 */
+		if (func[0] != '$' && ch != 'A' && ch != 'a')
 			pevent_register_function(pevent, func, addr, mod);
 		free(func);
 		free(mod);
@@ -444,7 +466,7 @@ void parse_proc_kallsyms(struct pevent *pevent,
 	}
 }
 
-void parse_ftrace_printk(struct pevent *pevent,
+void tracecmd_parse_ftrace_printk(struct pevent *pevent,
 			 char *file, unsigned int size __maybe_unused)
 {
 	unsigned long long addr;
@@ -505,7 +527,7 @@ static int update_option_value(struct pevent_plugin_option *op, const char *val)
 
 	op_val = strdup(val);
 	if (!op_val)
-		die("malloc");
+		return -ENOMEM;
 	lower_case(op_val);
 
 	if (strcmp(val, "1") == 0 || strcmp(val, "true") == 0)
@@ -531,7 +553,7 @@ static int process_option(const char *plugin, const char *option, const char *va
 	return update_option_value(op, val);
 }
 
-static void update_option(const char *file, struct pevent_plugin_option *option)
+static int update_option(const char *file, struct pevent_plugin_option *option)
 {
 	struct trace_plugin_options *op;
 	char *plugin;
@@ -539,12 +561,12 @@ static void update_option(const char *file, struct pevent_plugin_option *option)
 	if (option->plugin_alias) {
 		plugin = strdup(option->plugin_alias);
 		if (!plugin)
-			die("malloc");
+			return -ENOMEM;
 	} else {
 		char *p;
 		plugin = strdup(file);
 		if (!plugin)
-			die("malloc");
+			return -ENOMEM;
 		p = strstr(plugin, ".");
 		if (p)
 			*p = '\0';
@@ -578,10 +600,11 @@ static void update_option(const char *file, struct pevent_plugin_option *option)
 
  out:
 	free(plugin);
+	return 0;
 }
 
-static void load_plugin(struct pevent *pevent, const char *path,
-			const char *file, void *data)
+static int load_plugin(struct pevent *pevent, const char *path,
+		       const char *file, void *data)
 {
 	struct plugin_list **plugin_list = data;
 	pevent_plugin_load_func func;
@@ -590,12 +613,11 @@ static void load_plugin(struct pevent *pevent, const char *path,
 	const char *alias;
 	char *plugin;
 	void *handle;
+	int ret;
 
-	plugin = malloc_or_die(strlen(path) + strlen(file) + 2);
-
-	strcpy(plugin, path);
-	strcat(plugin, "/");
-	strcat(plugin, file);
+	ret = asprintf(&plugin, "%s/%s", path, file);
+	if (ret < 0)
+		return -ENOMEM;
 
 	handle = dlopen(plugin, RTLD_NOW | RTLD_GLOBAL);
 	if (!handle) {
@@ -611,7 +633,9 @@ static void load_plugin(struct pevent *pevent, const char *path,
 	options = dlsym(handle, PEVENT_PLUGIN_OPTIONS_NAME);
 	if (options) {
 		while (options->name) {
-			update_option(alias, options);
+			ret = update_option(alias, options);
+			if (ret < 0)
+				goto out_free;
 			options++;
 		}
 	}
@@ -623,7 +647,9 @@ static void load_plugin(struct pevent *pevent, const char *path,
 		goto out_free;
 	}
 
-	list = malloc_or_die(sizeof(*list));
+	list = malloc(sizeof(*list));
+	if (!list)
+		goto out_free;
 	list->next = *plugin_list;
 	list->handle = handle;
 	list->name = plugin;
@@ -631,10 +657,11 @@ static void load_plugin(struct pevent *pevent, const char *path,
 
 	pr_stat("registering plugin: %s", plugin);
 	func(pevent);
-	return;
+	return 0;
 
  out_free:
 	free(plugin);
+	return -1;
 }
 
 static int mount_debugfs(void)
@@ -645,7 +672,7 @@ static int mount_debugfs(void)
 	/* make sure debugfs exists */
 	ret = stat(DEBUGFS_PATH, &st);
 	if (ret < 0)
-		die("debugfs is not configured on this kernel");
+		return -1;
 
 	ret = mount("nodev", DEBUGFS_PATH,
 		    "debugfs", 0, NULL);
@@ -672,27 +699,29 @@ static int mount_tracefs(void)
 char *tracecmd_find_tracing_dir(void)
 {
 	char *debug_str = NULL;
-	char fspath[MAX_PATH+1];
+	char fspath[PATH_MAX+1];
 	char *tracing_dir;
 	char type[100];
 	int use_debug = 0;
 	FILE *fp;
-	
+
 	if ((fp = fopen("/proc/mounts","r")) == NULL) {
 		warning("Can't open /proc/mounts for read");
 		return NULL;
 	}
 
 	while (fscanf(fp, "%*s %"
-		      STR(MAX_PATH)
+		      STR(PATH_MAX)
 		      "s %99s %*s %*d %*d\n",
 		      fspath, type) == 2) {
 		if (strcmp(type, "tracefs") == 0)
 			break;
 		if (!debug_str && strcmp(type, "debugfs") == 0) {
 			debug_str = strdup(fspath);
-			if (!debug_str)
+			if (!debug_str) {
+				fclose(fp);
 				return NULL;
+			}
 		}
 	}
 	fclose(fp);
@@ -700,11 +729,12 @@ char *tracecmd_find_tracing_dir(void)
 	if (strcmp(type, "tracefs") != 0) {
 		if (mount_tracefs() < 0) {
 			if (debug_str) {
-				strncpy(fspath, debug_str, MAX_PATH);
-				fspath[MAX_PATH] = 0;
+				strncpy(fspath, debug_str, PATH_MAX);
+				fspath[PATH_MAX] = 0;
 			} else {
 				if (mount_debugfs() < 0) {
 					warning("debugfs not mounted, please mount");
+					free(debug_str);
 					return NULL;
 				}
 				strcpy(fspath, DEBUGFS_PATH);
@@ -716,16 +746,16 @@ char *tracecmd_find_tracing_dir(void)
 	free(debug_str);
 
 	if (use_debug) {
-		tracing_dir = malloc(strlen(fspath) + 9);
-		if (!tracing_dir)
-			return NULL;
+		int ret;
 
-		sprintf(tracing_dir, "%s/tracing", fspath);
+		ret = asprintf(&tracing_dir, "%s/tracing", fspath);
+		if (ret < 0)
+			return NULL;
 	} else {
 		tracing_dir = strdup(fspath);
 		if (!tracing_dir)
 			return NULL;
-	}		
+	}
 
 	return tracing_dir;
 }
@@ -741,16 +771,15 @@ const char *tracecmd_get_tracing_dir(void)
 	return tracing_dir;
 }
 
+/* FIXME: append_file() is duplicated and could be consolidated */
 static char *append_file(const char *dir, const char *name)
 {
 	char *file;
+	int ret;
 
-	file = malloc_or_die(strlen(dir) + strlen(name) + 2);
-	if (!file)
-		return NULL;
+	ret = asprintf(&file, "%s/%s", dir, name);
 
-	sprintf(file, "%s/%s", dir, name);
-	return file;
+	return ret < 0 ? NULL : file;
 }
 
 /**
@@ -769,16 +798,15 @@ static char *append_file(const char *dir, const char *name)
 char **tracecmd_add_list(char **list, const char *name, int len)
 {
 	if (!list)
-		list = malloc_or_die(sizeof(*list) * 2);
-	else {
+		list = malloc(sizeof(*list) * 2);
+	else
 		list = realloc(list, sizeof(*list) * (len + 2));
-		if (!list)
-			die("Can not allocate list");
-	}
+	if (!list)
+		return NULL;
 
 	list[len] = strdup(name);
 	if (!list[len])
-		die("Can not allocate list");
+		return NULL;
 
 	list[len + 1] = NULL;
 
@@ -822,12 +850,11 @@ void tracecmd_free_list(char **list)
 int *tracecmd_add_id(int *list, int id, int len)
 {
 	if (!list)
-		list = malloc_or_die(sizeof(*list) * 2);
-	else {
+		list = malloc(sizeof(*list) * 2);
+	else
 		list = realloc(list, sizeof(*list) * (len + 2));
-		if (!list)
-			die("Can ont allocate list");
-	}
+	if (!list)
+		return NULL;
 
 	list[len++] = id;
 	list[len] = -1;
@@ -1000,7 +1027,11 @@ static int read_file(const char *file, char **buffer)
 	if (fd < 0)
 		return -1;
 
-	buf = malloc_or_die(BUFSIZ + 1);
+	buf = malloc(BUFSIZ + 1);
+	if (!buf) {
+		len = -1;
+		goto out;
+	}
 
 	while ((r = read(fd, buf + len, BUFSIZ)) > 0) {
 		len += r;
@@ -1264,9 +1295,9 @@ char **tracecmd_local_plugins(const char *tracing_dir)
 static void
 trace_util_load_plugins_dir(struct pevent *pevent, const char *suffix,
 			    const char *path,
-			    void (*load_plugin)(struct pevent *pevent,
-						const char *path,
-						const char *name,
+			    int (*load_plugin)(struct pevent *pevent,
+					       const char *path,
+					       const char *name,
 						void *data),
 			    void *data)
 {
@@ -1311,8 +1342,8 @@ struct add_plugin_data {
 	char **files;
 };
 
-static void add_plugin_file(struct pevent *pevent, const char *path,
-			    const char *name, void *data)
+static int add_plugin_file(struct pevent *pevent, const char *path,
+			   const char *name, void *data)
 {
 	struct add_plugin_data *pdata = data;
 	char **ptr;
@@ -1320,7 +1351,7 @@ static void add_plugin_file(struct pevent *pevent, const char *path,
 	int i;
 
 	if (pdata->ret)
-		return;
+		return 0;
 
 	size = pdata->index + 2;
 	ptr = realloc(pdata->files, sizeof(char *) * size);
@@ -1334,7 +1365,7 @@ static void add_plugin_file(struct pevent *pevent, const char *path,
 	pdata->files = ptr;
 	pdata->index++;
 	pdata->files[pdata->index] = NULL;
-	return;
+	return 0;
 
  out_free:
 	for (i = 0; i < pdata->index; i++)
@@ -1342,21 +1373,23 @@ static void add_plugin_file(struct pevent *pevent, const char *path,
 	free(pdata->files);
 	pdata->files = NULL;
 	pdata->ret = errno;
+	return -ENOMEM;
 }
 
-void trace_util_load_plugins(struct pevent *pevent, const char *suffix,
-			     void (*load_plugin)(struct pevent *pevent,
-						 const char *path,
-						 const char *name,
-						 void *data),
-			     void *data)
+int trace_util_load_plugins(struct pevent *pevent, const char *suffix,
+			    int (*load_plugin)(struct pevent *pevent,
+					       const char *path,
+					       const char *name,
+					       void *data),
+			    void *data)
 {
 	char *home;
 	char *path;
-        char *envdir;
+	char *envdir;
+	int ret;
 
 	if (tracecmd_disable_plugins)
-		return;
+		return -EBUSY;
 
 /* If a system plugin directory was defined, check that first */
 #ifdef PLUGIN_DIR
@@ -1374,17 +1407,16 @@ void trace_util_load_plugins(struct pevent *pevent, const char *suffix,
 	home = getenv("HOME");
 
 	if (!home)
-		return;
+		return -EINVAL;
 
-	path = malloc_or_die(strlen(home) + strlen(LOCAL_PLUGIN_DIR) + 2);
-
-	strcpy(path, home);
-	strcat(path, "/");
-	strcat(path, LOCAL_PLUGIN_DIR);
+	ret = asprintf(&path, "%s/%s", home, LOCAL_PLUGIN_DIR);
+	if (ret < 0)
+		return -ENOMEM;
 
 	trace_util_load_plugins_dir(pevent, suffix, path, load_plugin, data);
 
 	free(path);
+	return 0;
 }
 
 /**
@@ -1406,7 +1438,6 @@ char **trace_util_find_plugin_files(const char *suffix)
 	struct add_plugin_data pdata;
 
 	memset(&pdata, 0, sizeof(pdata));
-
 
 	trace_util_load_plugins(NULL, suffix, add_plugin_file, &pdata);
 
@@ -1439,14 +1470,16 @@ struct plugin_option_read {
 	struct pevent_plugin_option	*options;
 };
 
-static void append_option(struct plugin_option_read *options,
-			  struct pevent_plugin_option *option,
-			  const char *alias, void *handle)
+static int append_option(struct plugin_option_read *options,
+			 struct pevent_plugin_option *option,
+			 const char *alias, void *handle)
 {
 	struct pevent_plugin_option *op;
 
 	while (option->name) {
-		op = malloc_or_die(sizeof(*op));
+		op = malloc(sizeof(*op));
+		if (!op)
+			return -ENOMEM;
 		*op = *option;
 		op->next = options->options;
 		options->options = op;
@@ -1454,9 +1487,10 @@ static void append_option(struct plugin_option_read *options,
 		op->handle = handle;
 		option++;
 	}
+	return 0;
 }
 
-static void read_options(struct pevent *pevent, const char *path,
+static int read_options(struct pevent *pevent, const char *path,
 			 const char *file, void *data)
 {
 	struct plugin_option_read *options = data;
@@ -1465,12 +1499,11 @@ static void read_options(struct pevent *pevent, const char *path,
 	int unload = 0;
 	char *plugin;
 	void *handle;
+	int ret;
 
-	plugin = malloc_or_die(strlen(path) + strlen(file) + 2);
-
-	strcpy(plugin, path);
-	strcat(plugin, "/");
-	strcat(plugin, file);
+	ret = asprintf(&plugin, "%s/%s", path, file);
+	if (ret < 0)
+		return -ENOMEM;
 
 	handle = dlopen(plugin, RTLD_NOW | RTLD_GLOBAL);
 	if (!handle) {
@@ -1496,6 +1529,7 @@ static void read_options(struct pevent *pevent, const char *path,
 		dlclose(handle);
  out_free:
 	free(plugin);
+	return 0;
 }
 
 struct pevent_plugin_option *trace_util_read_plugin_options(void)
@@ -1559,22 +1593,66 @@ char *tracecmd_get_tracing_file(const char *name)
 {
 	static const char *tracing;
 	char *file;
+	int ret;
 
 	if (!tracing) {
 		tracing = tracecmd_find_tracing_dir();
 		if (!tracing)
-			die("Can't find tracing dir");
+			return NULL;
 	}
 
-	file = malloc_or_die(strlen(tracing) + strlen(name) + 2);
-	if (!file)
+	ret = asprintf(&file, "%s/%s", tracing, name);
+	if (ret < 0)
 		return NULL;
 
-	sprintf(file, "%s/%s", tracing, name);
 	return file;
 }
 
 void tracecmd_put_tracing_file(char *name)
 {
 	free(name);
+}
+
+void __noreturn __vdie(const char *fmt, va_list ap)
+{
+	int ret = errno;
+
+	if (errno)
+		perror("trace-cmd");
+	else
+		ret = -1;
+
+	fprintf(stderr, "  ");
+	vfprintf(stderr, fmt, ap);
+
+	fprintf(stderr, "\n");
+	exit(ret);
+}
+
+void __noreturn __die(const char *fmt, ...)
+{
+	va_list ap;
+
+	va_start(ap, fmt);
+	__vdie(fmt, ap);
+	va_end(ap);
+}
+
+void __weak __noreturn die(const char *fmt, ...)
+{
+	va_list ap;
+
+	va_start(ap, fmt);
+	__vdie(fmt, ap);
+	va_end(ap);
+}
+
+void __weak *malloc_or_die(unsigned int size)
+{
+	void *data;
+
+	data = malloc(size);
+	if (!data)
+		die("malloc");
+	return data;
 }

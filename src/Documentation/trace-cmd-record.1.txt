@@ -25,12 +25,11 @@ file that can later be read (see trace-cmd-report(1)).
 
 OPTIONS
 -------
-*-p* 'plugin'::
-    Specify a trace plugin. Plugins are special Ftrace tracers that usually do
-    more than just trace an event. Common plugins are *function*,
-    *function_graph*, *preemptirqsoff*, *irqsoff*, *preemptoff*, and *wakeup*.
-    A plugin must be supported by the running kernel. To see a list of
-    available plugins, see trace-cmd-list(1).
+*-p* 'tracer'::
+    Specify a tracer. Tracers usually do more than just trace an event.
+    Common tracers are: *function*, *function_graph*, *preemptirqsoff*,
+    *irqsoff*, *preemptoff* and *wakeup*. A tracer must be supported by the
+    running kernel. To see a list of available tracers, see trace-cmd-list(1).
 
 *-e* 'event'::
     Specify an event to trace. Various static trace points have been added to
@@ -112,7 +111,8 @@ OPTIONS
      Similar to *-F* but lets you specify a process ID to trace.
 
 *-c*::
-     Used with either *-F* to trace the process' children too.
+     Used with either *-F* (or *-P* if kernel supports it) to trace the process'
+     children too.
 
 *-C* 'clock'::
      Set the trace clock to "clock".
@@ -257,11 +257,32 @@ OPTIONS
     reliable, the amount of data is not that intensive, and a guarantee is
     needed that all traced information is transfered successfully.
 
+*-q* | *--quiet*::
+    For use with recording an application. Suppresses normal output
+    (except for errors) to allow only the application's output to be displayed.
+
 *--date*::
     With the *--date* option, "trace-cmd" will write timestamps into the
     trace buffer after it has finished recording. It will then map the
     timestamp to gettimeofday which will allow wall time output from the
     timestamps reading the created 'trace.dat' file.
+
+*--max-graph-depth* 'depth'::
+    Set the maximum depth the function_graph tracer will trace into a function.
+    A value of one will only show where userspace enters the kernel but not any
+    functions called in the kernel. The default is zero, which means no limit.
+
+*--module* 'module'::
+    Filter a module's name in function tracing. It is equivalent to adding
+    ':mod:module' after all other functions being filtered. If no other function
+    filter is listed, then all modules functions will be filtered in the filter.
+
+    '--module snd'  is equivalent to  '-l :mod:snd'
+
+    '--module snd -l "*jack*"' is equivalent to '-l "*jack*:mod:snd"'
+
+    '--module snd -n "*"' is equivalent to '-n :mod:snd'
+
 
 *--profile*::
     With the *--profile* option, "trace-cmd" will enable tracing that can
@@ -285,6 +306,20 @@ OPTIONS
     Will profile hrtimer_expire_entry and hrtimer_expire_ext times.
 
     See trace-cmd-profile(1) for format.
+
+*-S*:: (for --profile only)
+    Only enable the tracer or events speficied on the command line.
+    With this option, the function_graph tracer is not enabled, nor are
+    any events (like sched_switch), unless they are specifically specified
+    on the command line (i.e. -p function -e sched_switch -e sched_wakeup)
+
+*--ts-offset offset*::
+    Add an offset for the timestamp in the trace.dat file. This will add a
+    offset option into the trace.dat file such that a trace-cmd report will
+    offset all the timestamps of the events by the given offset. The offset
+    is in raw units. That is, if the event timestamps are in nanoseconds
+    the offset will also be in nanoseconds even if the displayed units are
+    in microseconds.
 
 *--stderr*::
     Have output go to stderr instead of stdout, but the output of the command
